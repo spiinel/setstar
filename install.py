@@ -12,9 +12,6 @@ if not DOMAIN:
 PANEL_PORT = int(os.environ.get('PORT', 8080))
 XRAY_PORT = random.randint(10000, 60000)
 WS_PATH = f"/ws/{uuid.uuid4().hex[:16]}"
-FINGERPRINT = "chrome"
-ALPN = "h2,http/1.1"
-PUBLIC_PORT = 443
 
 print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT} | Path: {WS_PATH}")
 
@@ -57,11 +54,13 @@ def build_xray_config(uid):
 
 def make_url(uid):
     params = [
-        "security=tls", "encryption=none", "type=ws",
-        f"path={WS_PATH}", f"host={DOMAIN}", f"sni={DOMAIN}",
-        f"fp={FINGERPRINT}", f"alpn={ALPN}"
+        "security=none",
+        "encryption=none", 
+        "type=ws",
+        f"path={WS_PATH}",
+        f"host={DOMAIN}"
     ]
-    return f"vless://{uid}@{DOMAIN}:{PUBLIC_PORT}?{'&'.join(params)}#Spinel-{DOMAIN[:8]}"
+    return f"vless://{uid}@{DOMAIN}:{PANEL_PORT}?{'&'.join(params)}#Spinel-{DOMAIN[:8]}"
 
 download_xray()
 uid = str(uuid.uuid4())
@@ -83,9 +82,7 @@ def start_xray():
 start_xray()
 url = make_url(uid)
 
-# ========== WebSocket Frame Utils ==========
 def ws_read_frame(sock):
-    """Read a single WebSocket frame, return (opcode, payload) or None"""
     try:
         header = sock.recv(2)
         if len(header) < 2: return None
@@ -113,7 +110,6 @@ def ws_read_frame(sock):
     except: return None
 
 def ws_send_frame(sock, payload, opcode=0x2):
-    """Send a WebSocket frame (unmasked, server to client)"""
     header = bytearray()
     header.append(0x80 | opcode)
     length = len(payload)
@@ -125,31 +121,28 @@ def ws_send_frame(sock, payload, opcode=0x2):
     else:
         header.append(127)
         header.extend(struct.pack('!Q', length))
-    sock.send(bytes(header) + payload)
+    try:
+        sock.send(bytes(header) + payload)
+    except: pass
 
 def ws_relay(client, backend):
-    """Bidirectional WebSocket relay between client and backend (Xray)"""
     try:
         while True:
             r, _, _ = select.select([client, backend], [], [], 300)
             for s in r:
                 frame = ws_read_frame(s)
-                if frame is None:
-                    return
+                if frame is None: return
                 opcode, data = frame
-                if opcode == 0x8:  # Close
-                    return
+                if opcode == 0x8: return
                 if s == client:
-                    # Client -> Xray (send unmasked)
                     ws_send_frame(backend, data, opcode)
                 else:
-                    # Xray -> Client (send unmasked)
                     ws_send_frame(client, data, opcode)
     except: pass
 
 def handle_ws_upgrade(client_sock):
+    backend = None
     try:
-        # Connect to Xray via WebSocket
         backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         backend.connect(('127.0.0.1', XRAY_PORT))
         key = base64.b64encode(os.urandom(16)).decode()
@@ -158,15 +151,15 @@ def handle_ws_upgrade(client_sock):
         resp = b""
         while b"\r\n\r\n" not in resp:
             resp += backend.recv(4096)
-        if b"101" not in resp:
-            return
+        if b"101" not in resp: return
         ws_relay(client_sock, backend)
     except: pass
     finally:
         try: client_sock.close()
         except: pass
-        try: backend.close()
-        except: pass
+        if backend:
+            try: backend.close()
+            except: pass
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -174,7 +167,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(101)
             self.send_header('Upgrade', 'websocket')
             self.send_header('Connection', 'Upgrade')
-            self.send_header('Sec-WebSocket-Accept', '')  # optional
             self.end_headers()
             client = self.request
             self.request = None
@@ -213,11 +205,11 @@ class Handler(BaseHTTPRequestHandler):
 </style></head><body>
 <div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
 <div class="container">
-<div class="card"><h2>📡 VLESS Config <span class="badge badge-g">WS+TLS</span></h2>
+<div class="card"><h2>📡 VLESS Config <span class="badge badge-g">WS</span></h2>
 <div class="config-box" id="config">{url}</div>
-<p class="info">Address: {DOMAIN} | Port: 443</p>
+<p class="info">Address: {DOMAIN} | Port: {PANEL_PORT}</p>
+<p class="info">Network: WebSocket | Security: None</p>
 <p class="info">Path: {WS_PATH} | Host: {DOMAIN}</p>
-<p class="info">SNI: {DOMAIN} | Fingerprint: {FINGERPRINT}</p>
 <p class="info">UUID: {uid[:16]}...</p>
 <div class="row">
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
@@ -239,5 +231,5 @@ class ThreadedHTTPServer(HTTPServer):
         except: self.handle_error(request, client_address)
         finally: self.shutdown_request(request)
 
-print(f"✅ Spinel Panel ready | VLESS URL: {url}")
+print(f"✅ Spinel Panel ready | URL: {url}")
 ThreadedHTTPServer(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
