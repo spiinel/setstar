@@ -1,3 +1,4 @@
+
 import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket, threading, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
@@ -33,20 +34,12 @@ def build_xray_config():
             "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIPv4"}},
-            {"protocol": "freedom", "tag": "direct-ip", "settings": {"domainStrategy": "UseIP"}},
-            {"protocol": "blackhole", "tag": "blocked"}
-        ],
-        "routing": {
-            "domainStrategy": "IPOnDemand",
-            "rules": [
-                {"type": "field", "outboundTag": "direct", "network": "tcp,udp"}
-            ]
-        }
+            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIP"}}
+        ]
     }
 
 def make_url():
-    params = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome"
+    params = f"security=none&encryption=none&type=ws&path={path}&host={DOMAIN}"
     return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel"
 
 download_xray()
@@ -71,33 +64,22 @@ def handle_ws(client):
     backend = None
     try:
         backend = socket.socket()
-        backend.settimeout(10)
         backend.connect(('127.0.0.1', XRAY_PORT))
-        req_str = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        backend.send(req_str.encode())
+        backend.send(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
-            chunk = backend.recv(4096)
-            if not chunk: break
-            resp += chunk
-        if b"101" not in resp:
-            try: client.close()
-            except: pass
-            try: backend.close()
-            except: pass
-            return
+            resp += backend.recv(4096)
+        if b"101" not in resp: return
         t1 = threading.Thread(target=relay, args=(client, backend), daemon=True)
         t2 = threading.Thread(target=relay, args=(backend, client), daemon=True)
         t1.start(); t2.start()
         t1.join(); t2.join()
-    except Exception as e:
-        print(f"WS error: {e}")
+    except: pass
     finally:
         try: client.close()
         except: pass
-        if backend:
-            try: backend.close()
-            except: pass
+        if backend: try: backend.close()
+        except: pass
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -121,7 +103,7 @@ code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:8px;wor
 .btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em}}</style></head><body>
 <h1>🌀 Spinel VLESS</h1><p>{DOMAIN}</p>
 <div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
-<p>Port: 443 | TLS | WebSocket</p>
+<p>Port: 443 | WebSocket | VLESS</p>
 <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div></body></html>'''
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(h.encode())
