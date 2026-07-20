@@ -1,9 +1,22 @@
 import os, sys, json, base64, subprocess, threading, time, sqlite3, zipfile, tempfile, shutil, uuid, secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
 
-DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'localhost')
+DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+if not DOMAIN:
+    DOMAIN = os.environ.get('RAILWAY_STATIC_URL', '')
+if not DOMAIN:
+    try:
+        DOMAIN = socket.gethostname()
+    except:
+        DOMAIN = 'localhost'
+
 PORT = int(os.environ.get('PORT', 8080))
 VLESS_PORT = 443
+
+print(f"Domain: {DOMAIN}")
+print(f"Panel Port: {PORT}")
+print(f"VLESS Port: {VLESS_PORT}")
 
 def generate_keys():
     try:
@@ -26,32 +39,58 @@ def download_xray():
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
+        print("Xray downloaded")
         return True
-    except:
+    except Exception as e:
+        print(f"Download error: {e}")
         return False
 
 def build_xray_config(uid, pk, sid):
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
-            "tag": "vless-in", "listen": "0.0.0.0", "port": VLESS_PORT, "protocol": "vless",
-            "settings": {"clients": [{"id": uid, "flow": "xtls-rprx-vision", "encryption": "none"}], "decryption": "none"},
+            "tag": "vless-in",
+            "listen": "0.0.0.0",
+            "port": VLESS_PORT,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": uid, "flow": "xtls-rprx-vision", "encryption": "none"}],
+                "decryption": "none"
+            },
             "streamSettings": {
-                "network": "tcp", "security": "reality",
+                "network": "tcp",
+                "security": "reality",
                 "realitySettings": {
+                    "show": False,
                     "dest": "www.google.com:443",
-                    "serverNames": ["www.google.com", "google.com", "www.apple.com", "apple.com"],
-                    "privateKey": pk, "shortIds": ["", sid]
+                    "xver": 0,
+                    "serverNames": ["www.google.com", "google.com", "www.apple.com", "apple.com", "www.microsoft.com", "microsoft.com"],
+                    "privateKey": pk,
+                    "shortIds": ["", sid]
                 }
             },
             "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
         }],
-        "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "blocked"}]
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct", "settings": {}},
+            {"protocol": "blackhole", "tag": "blocked", "settings": {}}
+        ]
     }
 
 def make_url(uid, pk, pub, sid):
-    params = f"security=reality&encryption=none&flow=xtls-rprx-vision&sni={DOMAIN}&fp=chrome&alpn=h2,http/1.1&pbk={pub}&sid={sid}"
-    return f"vless://{uid}@{DOMAIN}:{VLESS_PORT}?{params}#VLESS-{DOMAIN[:10]}"
+    sni = "www.google.com"
+    params = [
+        "security=reality",
+        "encryption=none",
+        "flow=xtls-rprx-vision",
+        f"sni={sni}",
+        "fp=chrome",
+        "alpn=h2,http/1.1",
+        f"pbk={pub}",
+        f"sid={sid}"
+    ]
+    param_str = "&".join(params)
+    return f"vless://{uid}@{DOMAIN}:{VLESS_PORT}?{param_str}#VLESS-{DOMAIN[:10]}"
 
 download_xray()
 private_key, public_key = generate_keys()
@@ -65,7 +104,9 @@ with open('xray_config.json', 'w') as f: json.dump(config, f, indent=2)
 xray_proc = None
 try:
     xray_proc = subprocess.Popen(['./xray', 'run', '-config', 'xray_config.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-except: pass
+    print("Xray started")
+except Exception as e:
+    print(f"Xray error: {e}")
 
 HTML = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>VLESS Panel</title>
 <style>:root{{--bg:#0d1117;--card:#161b22;--border:#30363d;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--text:#c9d1d9;--dim:#8b949e}}
@@ -78,18 +119,21 @@ HTML = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8">
 .config-box{{background:rgba(0,0,0,.3);padding:12px;border-radius:8px;word-break:break-all;font-family:monospace;font-size:.75em;color:var(--green);margin:10px 0;line-height:1.8}}
 .btn{{padding:12px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:.85em;margin:5px 0;width:100%}}
 .btn-g{{background:#238636;color:#fff}}.btn-b{{background:#1f6feb;color:#fff}}.btn-r{{background:#da3633;color:#fff}}
-.info{{color:var(--dim);font-size:.75em;margin:5px 0}}.footer{{text-align:center;padding:20px;color:var(--dim);font-size:.7em}}</style></head><body>
+.info{{color:var(--dim);font-size:.75em;margin:5px 0}}.footer{{text-align:center;padding:20px;color:var(--dim);font-size:.7em}}
+</style></head><body>
 <div class="nav"><h1>🚀 VLESS Panel</h1><p style="color:var(--dim);font-size:.8em">{DOMAIN}</p></div>
 <div class="container">
 <div class="card"><h2>📋 VLESS Config</h2>
 <div class="config-box" id="config">{url}</div>
-<p class="info">Port: {VLESS_PORT} | Security: Reality | Network: TCP</p>
+<p class="info">Domain: {DOMAIN} | Port: {VLESS_PORT}</p>
+<p class="info">Security: Reality | Flow: xtls-rprx-vision</p>
+<p class="info">SNI: www.google.com | Fingerprint: chrome</p>
 <p class="info">UUID: {uid}</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy Config</button>
 <button class="btn btn-b" onclick="gen()">🔄 New Config</button>
 </div>
-<div class="card"><h2>📱 Usage</h2>
-<p style="color:var(--dim);line-height:2">1. Copy VLESS link<br>2. Open V2Ray/Xray<br>3. Import from clipboard<br>4. Connect ✅</p>
+<div class="card"><h2>📱 How to Use</h2>
+<p style="color:var(--dim);line-height:2">1. Copy VLESS link<br>2. Open V2RayNG / Xray client<br>3. Import from clipboard<br>4. Connect ✅</p>
 </div></div>
 <div class="footer">VLESS Panel | {DOMAIN}</div>
 <script>
@@ -103,7 +147,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(HTML.encode())
         elif self.path == '/new':
-            global xray_proc
+            global xray_proc, config, url
             uid = str(uuid.uuid4()); pk, pub = generate_keys(); sid = secrets.token_hex(8)
             url = make_url(uid, pk, pub, sid)
             config['inbounds'][0]['settings']['clients'].append({"id":uid,"flow":"xtls-rprx-vision","encryption":"none"})
@@ -124,9 +168,13 @@ class Handler(BaseHTTPRequestHandler):
 print(f"""
 ╔══════════════════════════════════════╗
 ║   🚀 VLESS PANEL READY              ║
-║   http://{DOMAIN}:{PORT}             ║
-║   Config: {url[:60]}...  ║
+║   Domain: {DOMAIN}                   ║
+║   Panel: http://{DOMAIN}:{PORT}      ║
+║   VLESS Port: {VLESS_PORT}           ║
 ╚══════════════════════════════════════╝
+
+📋 Config:
+{url}
 """)
 
 HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
