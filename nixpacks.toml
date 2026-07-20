@@ -1,0 +1,8 @@
+[providers]
+type = "python"
+
+[phases.install]
+cmds = ["pip install requests"]
+
+[start]
+cmd = "python install.py"
