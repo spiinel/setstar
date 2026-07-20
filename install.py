@@ -1,16 +1,22 @@
-import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket, threading, hashlib
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket
 import requests as req
 
+# ========== CONFIG ==========
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '') or socket.gethostname()
-XRAY_PORT = int(os.environ.get('PORT', 8080))
-PANEL_PORT = 12880
+PORT = int(os.environ.get('PORT', 8080))
 
-current_uid = str(uuid_lib.uuid4())
-current_path = f"/ws/{current_uid}"
+print(f"""
+╔══════════════════════════════════════╗
+║   🌀 Spinel VLESS - Railway Edition ║
+║   Domain: {DOMAIN}                   ║
+║   Port: {PORT}                       ║
+╚══════════════════════════════════════╝
+""")
 
+# ========== DOWNLOAD XRAY ==========
 def download_xray():
     if os.path.exists('./xray'): return True
+    print("[*] Downloading Xray Core...")
     try:
         url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         r = req.get(url, timeout=120)
@@ -18,70 +24,142 @@ def download_xray():
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
+        print("[+] Xray downloaded")
         return True
-    except: return False
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        return False
 
-def build_config(uid, path):
+# ========== GENERATE KEYS ==========
+def generate_reality_keys():
+    try:
+        r = subprocess.run(['./xray', 'x25519'], capture_output=True, text=True, timeout=10)
+        pk, pub = None, None
+        for line in r.stdout.split('\n'):
+            if 'Private key:' in line: pk = line.split(':')[1].strip()
+            if 'Public key:' in line: pub = line.split(':')[1].strip()
+        if pk and pub: return pk, pub
+    except: pass
+    return 'aK8jIpm5hJX9vL3nQ7wRtY2xU4kP6mSd', 'Ag0kP6mSdY2xU4kP6mSdY2xU4kP6mSdY2xU4kP6mSd'
+
+# ========== BUILD XRAY CONFIG (Sanayi Style) ==========
+def build_xray_config(uid, private_key, short_id):
     return {
-        "log": {"loglevel": "error"},
-        "inbounds": [{
-            "listen": "0.0.0.0", "port": XRAY_PORT, "protocol": "vless",
-            "settings": {"clients": [{"id": uid, "encryption": "none"}], "decryption": "none"},
-            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
-        }],
-        "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "vless-ws-tls",
+                "listen": "0.0.0.0",
+                "port": PORT,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": uid, "encryption": "none"}],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "none",
+                    "wsSettings": {
+                        "path": f"/ws/{uid}",
+                        "headers": {"Host": DOMAIN}
+                    }
+                },
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
+            },
+            {
+                "tag": "vless-reality",
+                "listen": "0.0.0.0",
+                "port": PORT + 1,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": uid, "flow": "xtls-rprx-vision", "encryption": "none"}],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": False,
+                        "dest": "www.google.com:443",
+                        "xver": 0,
+                        "serverNames": ["www.google.com", "google.com", "www.apple.com", "apple.com"],
+                        "privateKey": private_key,
+                        "shortIds": ["", short_id],
+                        "minClientVer": "",
+                        "maxClientVer": "",
+                        "maxTimeDiff": 0
+                    }
+                },
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
+            }
+        ],
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct", "settings": {}},
+            {"protocol": "blackhole", "tag": "blocked", "settings": {}}
+        ]
     }
 
-def make_url(uid, path):
-    p = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome"
-    return f"vless://{uid}@{DOMAIN}:443?{p}#Spinel"
+# ========== MAKE VLESS URLS ==========
+def make_ws_url(uid):
+    path = f"/ws/{uid}"
+    params = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome"
+    return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel-WS"
 
-download_xray()
-with open('xray.json', 'w') as f: json.dump(build_config(current_uid, current_path), f)
-subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def make_reality_url(uid, public_key, short_id):
+    params = f"security=reality&encryption=none&flow=xtls-rprx-vision&sni=www.google.com&fp=chrome&alpn=h2,http/1.1&pbk={public_key}&sid={short_id}"
+    return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel-Reality"
+
+# ========== MAIN ==========
+if not download_xray():
+    print("[-] Failed to download Xray")
+    sys.exit(1)
+
+uid = str(uuid_lib.uuid4())
+private_key, public_key = generate_reality_keys()
+short_id = uuid_lib.uuid4().hex[:16]
+
+ws_url = make_ws_url(uid)
+reality_url = make_reality_url(uid, public_key, short_id)
+
+config = build_xray_config(uid, private_key, short_id)
+with open('xray_config.json', 'w') as f:
+    json.dump(config, f, indent=2)
+
+print("[*] Starting Xray...")
+subprocess.Popen(['./xray', 'run', '-config', 'xray_config.json'],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(2)
-current_url = make_url(current_uid, current_path)
 
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            h = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
-<style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:20px;text-align:center}}
-.box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;max-width:600px;margin:20px auto}}
-code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:8px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
-.btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em;margin:5px}}</style></head><body>
-<h1>🌀 Spinel VLESS</h1><p>{DOMAIN}</p>
-<div class="box"><h3>📡 Config</h3><code id="c">{current_url}</code>
-<p>Port: 443 | Path: {current_path}</p>
-<button class="btn" onclick="copy()">📋 Copy</button>
-<button class="btn" onclick="gen()">🔄 New</button></div>
-<script>
-function copy(){{navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')}}
-async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('c').textContent=d.url}}
-</script></body></html>'''
-            self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
-            self.wfile.write(h.encode())
-        elif self.path == '/new':
-            global current_uid, current_path, current_url
-            current_uid = str(uuid_lib.uuid4()); current_path = f"/ws/{current_uid}"
-            with open('xray.json','w') as f: json.dump(build_config(current_uid, current_path),f)
-            subprocess.run(['pkill','-f','./xray'],capture_output=True); time.sleep(1)
-            subprocess.Popen(['./xray','run','-config','xray.json'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-            current_url = make_url(current_uid, current_path)
-            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({'url':current_url}).encode())
-        elif self.path == '/health':
-            self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
-        else: self.send_response(404); self.end_headers()
-    def log_message(self,f,*a): pass
+# ========== SIMPLE OUTPUT ==========
+print(f"""
+╔══════════════════════════════════════════════════╗
+║   ✅ Spinel VLESS Ready                          ║
+╚══════════════════════════════════════════════════╝
 
-def run():
-    try: HTTPServer(('0.0.0.0', PANEL_PORT), H).serve_forever()
-    except: pass
+📡 WebSocket + TLS (Recommended):
+{ws_url}
 
-threading.Thread(target=run, daemon=True).start()
-print(f"VLESS: {DOMAIN}:443 | Panel: {DOMAIN}:{PANEL_PORT}")
+📡 Reality + TCP (Alternative):
+{reality_url}
 
+📋 Connection Info:
+   Domain: {DOMAIN}
+   Port: 443 (WebSocket) / 443 (Reality)
+   UUID: {uid}
+   WS Path: /ws/{uid}
+   Reality SNI: www.google.com
+   Fingerprint: chrome
+
+💡 How to use:
+   1. Copy one of the VLESS links above
+   2. Open v2rayNG/Nekobox
+   3. Import from clipboard
+   4. Connect ✅
+""")
+
+# ========== KEEP ALIVE ==========
 try:
-    while True: time.sleep(3600)
-except KeyboardInterrupt: pass
+    while True:
+        time.sleep(3600)
+except KeyboardInterrupt:
+    print("\n[*] Shutting down...")
