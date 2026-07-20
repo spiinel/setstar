@@ -1,10 +1,9 @@
-import os, sys, json, base64, subprocess, time, uuid as uuid_lib, secrets, zipfile, socket, threading, hashlib, re
+import os, sys, json, base64, subprocess, time, uuid as uuid_lib, secrets, zipfile, socket, threading, hashlib, struct
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
-if not DOMAIN:
-    DOMAIN = os.environ.get('RAILWAY_STATIC_URL', '')
+if not DOMAIN: DOMAIN = os.environ.get('RAILWAY_STATIC_URL', '')
 if not DOMAIN:
     try: DOMAIN = socket.gethostname()
     except: DOMAIN = 'localhost'
@@ -14,7 +13,6 @@ XRAY_PORT = 10086
 
 print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT}")
 
-users = {}  # {uid: path}
 current_uid = str(uuid_lib.uuid4())
 current_path = f"/ws/{current_uid}"
 current_url = ""
@@ -28,71 +26,97 @@ def download_xray():
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
-        print("[+] Xray downloaded")
         return True
     except: return False
 
-def build_config():
-    """ساخت کانفیگ Xray با تمام user ها"""
-    inbounds = []
-    for uid, path in users.items():
-        inbounds.append({
+def build_config(uid, path):
+    return {
+        "log": {"loglevel": "error"},
+        "inbounds": [{
             "listen": "127.0.0.1",
             "port": XRAY_PORT,
             "protocol": "vless",
             "settings": {"clients": [{"id": uid}], "decryption": "none"},
             "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
-        })
-    
-    return {
-        "log": {"loglevel": "error"},
-        "inbounds": inbounds if inbounds else [{
-            "listen": "127.0.0.1",
-            "port": XRAY_PORT,
-            "protocol": "vless",
-            "settings": {"clients": [{"id": current_uid}], "decryption": "none"},
-            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": current_path}}
         }],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}]
     }
 
 def make_url(uid, path):
-    params = [
-        "security=tls",
-        "encryption=none",
-        "type=ws",
-        f"path={path}",
-        f"host={DOMAIN}",
-        f"sni={DOMAIN}",
-        "alpn=http/1.1",
-        "fp=chrome"
-    ]
-    return f"vless://{uid}@{DOMAIN}:443?{'&'.join(params)}#Spinel"
+    params = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome"
+    return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel"
 
-users[current_uid] = current_path
 download_xray()
-with open('xray.json', 'w') as f: json.dump(build_config(), f)
-
+with open('xray.json', 'w') as f: json.dump(build_config(current_uid, current_path), f)
 try:
     subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
-    print("[+] Xray started")
 except: pass
 
 current_url = make_url(current_uid, current_path)
 
-def relay(src, dst):
+# ========== WebSocket Frame Handler ==========
+def read_ws_frame(sock):
+    """Read a WebSocket frame"""
     try:
+        header = sock.recv(2)
+        if len(header) < 2: return None, None
+        opcode = header[0] & 0x0F
+        masked = (header[1] & 0x80) != 0
+        length = header[1] & 0x7F
+        
+        if length == 126:
+            length = struct.unpack('!H', sock.recv(2))[0]
+        elif length == 127:
+            length = struct.unpack('!Q', sock.recv(8))[0]
+        
+        mask = sock.recv(4) if masked else b''
+        payload = bytearray()
+        while len(payload) < length:
+            chunk = sock.recv(min(4096, length - len(payload)))
+            if not chunk: break
+            payload.extend(chunk)
+        
+        if masked:
+            payload = bytearray(b ^ mask[i % 4] for i, b in enumerate(payload))
+        
+        return opcode, bytes(payload)
+    except:
+        return None, None
+
+def send_ws_frame(sock, payload, opcode=0x2):
+    """Send a WebSocket frame (unmasked, server→client)"""
+    header = bytearray()
+    header.append(0x80 | opcode)
+    length = len(payload)
+    if length <= 125:
+        header.append(length)
+    elif length <= 65535:
+        header.append(126)
+        header.extend(struct.pack('!H', length))
+    else:
+        header.append(127)
+        header.extend(struct.pack('!Q', length))
+    try:
+        sock.send(bytes(header) + payload)
+    except:
+        pass
+
+def ws_relay(client, backend):
+    """Bidirectional WebSocket relay with frame handling"""
+    try:
+        sockets = [client, backend]
         while True:
-            data = src.recv(4096)
-            if not data: break
-            dst.send(data)
+            r, _, _ = select.select(sockets, [], [], 300)
+            for s in r:
+                opcode, data = read_ws_frame(s)
+                if opcode is None: return
+                if opcode == 0x8: return  # Close
+                if s == client:
+                    send_ws_frame(backend, data, opcode)
+                else:
+                    send_ws_frame(client, data, opcode)
     except: pass
-    finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
 
 def handle_ws(client_sock, path):
     backend = None
@@ -103,29 +127,16 @@ def handle_ws(client_sock, path):
         
         req = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         backend.send(req.encode())
-        
         resp = b""
         while b"\r\n\r\n" not in resp:
             chunk = backend.recv(4096)
             if not chunk: break
             resp += chunk
         
-        if b"101" not in resp:
-            try: client_sock.close()
-            except: pass
-            try: backend.close()
-            except: pass
-            return
+        if b"101" not in resp: return
         
-        t1 = threading.Thread(target=relay, args=(client_sock, backend), daemon=True)
-        t2 = threading.Thread(target=relay, args=(backend, client_sock), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-        
-    except Exception as e:
-        print(f"WS error: {e}")
+        ws_relay(client_sock, backend)
+    except: pass
     finally:
         try: client_sock.close()
         except: pass
@@ -136,24 +147,17 @@ def handle_ws(client_sock, path):
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/ws/'):
-            try:
-                key = self.headers.get('Sec-WebSocket-Key', '')
-                accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-                
-                self.send_response(101)
-                self.send_header('Upgrade', 'websocket')
-                self.send_header('Connection', 'Upgrade')
-                self.send_header('Sec-WebSocket-Accept', accept)
-                self.end_headers()
-                
-                client = self.request
-                self.request = None
-                
-                threading.Thread(target=handle_ws, args=(client, self.path), daemon=True).start()
-                
-            except Exception as e:
-                print(f"Upgrade error: {e}")
-                
+            key = self.headers.get('Sec-WebSocket-Key', '')
+            accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+            self.send_response(101)
+            self.send_header('Upgrade', 'websocket')
+            self.send_header('Connection', 'Upgrade')
+            self.send_header('Sec-WebSocket-Accept', accept)
+            self.end_headers()
+            client = self.request
+            self.request = None
+            threading.Thread(target=handle_ws, args=(client, self.path), daemon=True).start()
+            
         elif self.path == '/':
             html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Spinel VLESS</title>
 <style>:root{{--bg:#0d1117;--card:#161b22;--border:#30363d;--blue:#58a6ff;--green:#3fb950;--text:#c9d1d9;--dim:#8b949e}}
@@ -173,9 +177,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class="card"><h2>📡 VLESS Config</h2>
 <div class="config-box" id="config">{current_url}</div>
 <p class="info">Address: {DOMAIN} | Port: 443</p>
-<p class="info">Security: TLS | Network: WebSocket</p>
-<p class="info">Path: {current_path}</p>
-<p class="info">UUID: {current_uid[:16]}...</p>
+<p class="info">Path: {current_path} | Security: TLS</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
 </div></div>
@@ -189,14 +191,10 @@ async function gen(){{let r=await fetch('/new');let d=await r.json();document.ge
         elif self.path == '/new':
             new_uid = str(uuid_lib.uuid4())
             new_path = f"/ws/{new_uid}"
-            users[new_uid] = new_path
-            with open('xray.json', 'w') as f: json.dump(build_config(), f)
-            # Restart Xray
-            try:
-                subprocess.run(['pkill', 'xray'], capture_output=True)
-                time.sleep(1)
-                subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except: pass
+            with open('xray.json', 'w') as f: json.dump(build_config(new_uid, new_path), f)
+            subprocess.run(['pkill', 'xray'], capture_output=True)
+            time.sleep(1)
+            subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             new_url = make_url(new_uid, new_path)
             self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
             self.wfile.write(json.dumps({'url':new_url}).encode())
@@ -205,13 +203,12 @@ async function gen(){{let r=await fetch('/new');let d=await r.json();document.ge
             self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
         else:
             self.send_response(404); self.end_headers()
-    
     def log_message(self, f, *a): pass
 
+import select
 class ThreadedHTTPServer(HTTPServer):
     def process_request(self, request, client_address):
-        t = threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True)
-        t.start()
+        threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True).start()
     def process_request_thread(self, request, client_address):
         try: self.finish_request(request, client_address)
         except: self.handle_error(request, client_address)
