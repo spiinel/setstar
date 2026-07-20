@@ -4,8 +4,6 @@ import requests as req
 
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
 if not DOMAIN:
-    DOMAIN = os.environ.get('RAILWAY_STATIC_URL', '')
-if not DOMAIN:
     try: DOMAIN = socket.gethostname()
     except: DOMAIN = 'localhost'
 
@@ -13,26 +11,33 @@ PANEL_PORT = int(os.environ.get('PORT', 8080))
 XRAY_PORT = random.randint(10000, 60000)
 WS_PATH = f"/ws/{uuid.uuid4().hex[:16]}"
 
-print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT} | Path: {WS_PATH}")
+print(f"[*] Domain: {DOMAIN}")
+print(f"[*] Panel Port: {PANEL_PORT}")
+print(f"[*] Xray Port: {XRAY_PORT}")
+print(f"[*] WS Path: {WS_PATH}")
 
 def download_xray():
     if os.path.exists('./xray'): return True
     try:
+        print("[*] Downloading Xray...")
         url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         r = req.get(url, timeout=120)
         with open('xray.zip', 'wb') as f: f.write(r.content)
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
+        print("[+] Xray downloaded")
         return True
-    except: return False
+    except Exception as e:
+        print(f"[-] Xray download failed: {e}")
+        return False
 
 def build_xray_config(uid):
     return {
-        "log": {"loglevel": "warning"},
+        "log": {"loglevel": "debug", "access": "/dev/stdout", "error": "/dev/stdout"},
         "inbounds": [{
             "tag": "vless-ws",
-            "listen": "0.0.0.0",
+            "listen": "127.0.0.1",
             "port": XRAY_PORT,
             "protocol": "vless",
             "settings": {
@@ -62,10 +67,13 @@ def make_url(uid):
     ]
     return f"vless://{uid}@{DOMAIN}:{PANEL_PORT}?{'&'.join(params)}#Spinel-{DOMAIN[:8]}"
 
-download_xray()
+if not download_xray():
+    sys.exit(1)
+
 uid = str(uuid.uuid4())
 config = build_xray_config(uid)
 with open('xray_config.json', 'w') as f: json.dump(config, f, indent=2)
+print(f"[+] Xray config written")
 
 xray_proc = None
 def start_xray():
@@ -75,11 +83,24 @@ def start_xray():
         except: pass
         time.sleep(1)
     try:
-        xray_proc = subprocess.Popen(['./xray', 'run', '-config', 'xray_config.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        xray_proc = subprocess.Popen(
+            ['./xray', 'run', '-config', 'xray_config.json'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        time.sleep(2)
+        if xray_proc.poll() is not None:
+            out = xray_proc.stdout.read().decode()
+            print(f"[-] Xray failed: {out}")
+            return False
+        print(f"[+] Xray started on {XRAY_PORT}")
         return True
-    except: return False
+    except Exception as e:
+        print(f"[-] Xray error: {e}")
+        return False
 
-start_xray()
+if not start_xray():
+    sys.exit(1)
+
 url = make_url(uid)
 
 def ws_read_frame(sock):
@@ -138,22 +159,37 @@ def ws_relay(client, backend):
                     ws_send_frame(backend, data, opcode)
                 else:
                     ws_send_frame(client, data, opcode)
-    except: pass
+    except Exception as e:
+        print(f"[!] Relay error: {e}")
 
 def handle_ws_upgrade(client_sock):
     backend = None
     try:
+        print(f"[*] WS upgrade from {client_sock.getpeername()}")
         backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        backend.settimeout(5)
         backend.connect(('127.0.0.1', XRAY_PORT))
+        
         key = base64.b64encode(os.urandom(16)).decode()
         req = f"GET {WS_PATH} HTTP/1.1\r\nHost: 127.0.0.1:{XRAY_PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         backend.send(req.encode())
+        
         resp = b""
         while b"\r\n\r\n" not in resp:
-            resp += backend.recv(4096)
-        if b"101" not in resp: return
+            chunk = backend.recv(4096)
+            if not chunk: break
+            resp += chunk
+        
+        print(f"[*] Xray response: {resp[:200]}")
+        
+        if b"101" not in resp:
+            print(f"[-] Xray didn't upgrade: {resp}")
+            return
+        
+        print(f"[+] WebSocket established, relaying...")
         ws_relay(client_sock, backend)
-    except: pass
+    except Exception as e:
+        print(f"[-] WS error: {e}")
     finally:
         try: client_sock.close()
         except: pass
@@ -163,14 +199,21 @@ def handle_ws_upgrade(client_sock):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        print(f"[*] Request: {self.path}")
+        
         if self.path.startswith('/ws/'):
+            print(f"[+] WebSocket request: {self.path}")
             self.send_response(101)
             self.send_header('Upgrade', 'websocket')
             self.send_header('Connection', 'Upgrade')
+            self.send_header('Sec-WebSocket-Accept', base64.b64encode(hashlib.sha1(
+                self.headers.get('Sec-WebSocket-Key', '').encode() + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+            ).digest()).decode())
             self.end_headers()
             client = self.request
             self.request = None
             threading.Thread(target=handle_ws_upgrade, args=(client,), daemon=True).start()
+            
         elif self.path == '/':
             self.serve_html()
         elif self.path == '/new':
@@ -184,6 +227,19 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({'url':url,'uuid':uid}).encode())
         elif self.path == '/health':
             self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
+        elif self.path == '/test':
+            # Test Xray directly
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(('127.0.0.1', XRAY_PORT))
+                s.send(f"GET {WS_PATH} HTTP/1.1\r\nHost: 127.0.0.1:{XRAY_PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+                resp = s.recv(1024)
+                s.close()
+                self.send_response(200); self.end_headers()
+                self.wfile.write(f"Xray on {XRAY_PORT}: {resp.decode()}".encode())
+            except Exception as e:
+                self.send_response(500); self.end_headers()
+                self.wfile.write(str(e).encode())
         else:
             self.send_response(404); self.end_headers()
 
@@ -197,27 +253,22 @@ class Handler(BaseHTTPRequestHandler):
 .card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin:12px 0}}
 .card h2{{color:var(--blue);font-size:.95em;margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:8px}}
 .config-box{{background:rgba(0,0,0,.4);padding:10px;border-radius:8px;word-break:break-all;font-family:monospace;font-size:.7em;color:var(--green);margin:8px 0;line-height:1.6;max-height:150px;overflow-y:auto}}
-.info{{color:var(--dim);font-size:.7em;margin:3px 0}}.badge{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.65em;font-weight:bold;margin:2px}}
-.badge-g{{background:rgba(63,185,80,.2);color:#3fb950}}
+.info{{color:var(--dim);font-size:.7em;margin:3px 0}}
 .btn{{padding:10px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:.8em;margin:4px 0;width:100%}}
 .btn-g{{background:#238636;color:#fff}}.btn-b{{background:#1f6feb;color:#fff}}
-.row{{display:flex;gap:8px}}.row .btn{{flex:1}}
 </style></head><body>
 <div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
 <div class="container">
-<div class="card"><h2>📡 VLESS Config <span class="badge badge-g">WS</span></h2>
+<div class="card"><h2>📡 VLESS Config</h2>
 <div class="config-box" id="config">{url}</div>
 <p class="info">Address: {DOMAIN} | Port: {PANEL_PORT}</p>
-<p class="info">Network: WebSocket | Security: None</p>
-<p class="info">Path: {WS_PATH} | Host: {DOMAIN}</p>
-<p class="info">UUID: {uid[:16]}...</p>
-<div class="row">
+<p class="info">Path: {WS_PATH} | UUID: {uid[:16]}...</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
-</div></div></div>
+</div></div>
 <script>
-function copy(){{navigator.clipboard.writeText(document.getElementById('config').textContent);alert('✅ Copied!')}}
-async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('config').textContent=d.url;alert('✅ New config!')}}
+function copy(){{navigator.clipboard.writeText(document.getElementById('config').textContent);alert('Copied!')}}
+async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('config').textContent=d.url;alert('New config!')}}
 </script></body></html>'''
         self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
         self.wfile.write(html.encode())
@@ -231,5 +282,9 @@ class ThreadedHTTPServer(HTTPServer):
         except: self.handle_error(request, client_address)
         finally: self.shutdown_request(request)
 
-print(f"✅ Spinel Panel ready | URL: {url}")
+print(f"\n{'='*50}")
+print(f"✅ Panel: http://{DOMAIN}:{PANEL_PORT}")
+print(f"✅ Test: http://{DOMAIN}:{PANEL_PORT}/test")
+print(f"✅ VLESS: {url}")
+print(f"{'='*50}\n")
 ThreadedHTTPServer(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
