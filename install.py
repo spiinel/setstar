@@ -55,8 +55,7 @@ def make_url(uid):
         f"host={DOMAIN}",
         f"sni={DOMAIN}",
         "alpn=http/1.1",
-        "fp=chrome",
-        "allowInsecure=1"
+        "fp=chrome"
     ]
     return f"vless://{uid}@{DOMAIN}:443?{'&'.join(params)}#Spinel"
 
@@ -165,11 +164,12 @@ class Handler(BaseHTTPRequestHandler):
 </style></head><body>
 <div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
 <div class="container">
-<div class="card"><h2>📡 VLESS Config (TLS)</h2>
+<div class="card"><h2>📡 VLESS Config</h2>
 <div class="config-box" id="config">{current_url}</div>
 <p class="info">Address: {DOMAIN} | Port: 443</p>
-<p class="info">Security: TLS | allowInsecure: true</p>
-<p class="info">Path: {WS_PATH}</p>
+<p class="info">Security: TLS | Network: WebSocket</p>
+<p class="info">Path: {WS_PATH} | SNI: {DOMAIN}</p>
+<p class="info">UUID: {current_uid[:16]}...</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
 </div></div>
