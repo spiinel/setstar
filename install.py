@@ -1,4 +1,4 @@
-import os, sys, json, base64, subprocess, time, uuid, secrets, zipfile, socket, threading, hashlib
+import os, sys, json, base64, subprocess, time, uuid as uuid_lib, secrets, zipfile, socket, threading, hashlib, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
@@ -11,11 +11,12 @@ if not DOMAIN:
 
 PANEL_PORT = int(os.environ.get('PORT', 8080))
 XRAY_PORT = 10086
-WS_PATH = f"/ws/{uuid.uuid4().hex[:8]}"
 
-print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT} | Path: {WS_PATH}")
+print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT}")
 
-current_uid = str(uuid.uuid4())
+users = {}  # {uid: path}
+current_uid = str(uuid_lib.uuid4())
+current_path = f"/ws/{current_uid}"
 current_url = ""
 
 def download_xray():
@@ -29,29 +30,38 @@ def download_xray():
         os.remove('xray.zip')
         print("[+] Xray downloaded")
         return True
-    except Exception as e:
-        print(f"[-] Xray error: {e}")
-        return False
+    except: return False
 
-def build_config(uid):
-    return {
-        "log": {"loglevel": "error"},
-        "inbounds": [{
+def build_config():
+    """ساخت کانفیگ Xray با تمام user ها"""
+    inbounds = []
+    for uid, path in users.items():
+        inbounds.append({
             "listen": "127.0.0.1",
             "port": XRAY_PORT,
             "protocol": "vless",
             "settings": {"clients": [{"id": uid}], "decryption": "none"},
-            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": WS_PATH}}
+            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
+        })
+    
+    return {
+        "log": {"loglevel": "error"},
+        "inbounds": inbounds if inbounds else [{
+            "listen": "127.0.0.1",
+            "port": XRAY_PORT,
+            "protocol": "vless",
+            "settings": {"clients": [{"id": current_uid}], "decryption": "none"},
+            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": current_path}}
         }],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}]
     }
 
-def make_url(uid):
+def make_url(uid, path):
     params = [
         "security=tls",
         "encryption=none",
         "type=ws",
-        f"path={WS_PATH}",
+        f"path={path}",
         f"host={DOMAIN}",
         f"sni={DOMAIN}",
         "alpn=http/1.1",
@@ -59,18 +69,17 @@ def make_url(uid):
     ]
     return f"vless://{uid}@{DOMAIN}:443?{'&'.join(params)}#Spinel"
 
+users[current_uid] = current_path
 download_xray()
-with open('xray.json', 'w') as f: json.dump(build_config(current_uid), f)
+with open('xray.json', 'w') as f: json.dump(build_config(), f)
 
 try:
-    subprocess.Popen(['./xray', 'run', '-config', 'xray.json'],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     print("[+] Xray started")
-except Exception as e:
-    print(f"[-] Xray error: {e}")
+except: pass
 
-current_url = make_url(current_uid)
+current_url = make_url(current_uid, current_path)
 
 def relay(src, dst):
     try:
@@ -78,22 +87,21 @@ def relay(src, dst):
             data = src.recv(4096)
             if not data: break
             dst.send(data)
-    except:
-        pass
+    except: pass
     finally:
         try: src.close()
         except: pass
         try: dst.close()
         except: pass
 
-def handle_ws(client_sock):
+def handle_ws(client_sock, path):
     backend = None
     try:
         backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         backend.settimeout(5)
         backend.connect(('127.0.0.1', XRAY_PORT))
         
-        req = f"GET {WS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        req = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         backend.send(req.encode())
         
         resp = b""
@@ -130,9 +138,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/ws/'):
             try:
                 key = self.headers.get('Sec-WebSocket-Key', '')
-                accept = base64.b64encode(
-                    hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()
-                ).decode()
+                accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
                 
                 self.send_response(101)
                 self.send_header('Upgrade', 'websocket')
@@ -143,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
                 client = self.request
                 self.request = None
                 
-                threading.Thread(target=handle_ws, args=(client,), daemon=True).start()
+                threading.Thread(target=handle_ws, args=(client, self.path), daemon=True).start()
                 
             except Exception as e:
                 print(f"Upgrade error: {e}")
@@ -168,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class="config-box" id="config">{current_url}</div>
 <p class="info">Address: {DOMAIN} | Port: 443</p>
 <p class="info">Security: TLS | Network: WebSocket</p>
-<p class="info">Path: {WS_PATH} | SNI: {DOMAIN}</p>
+<p class="info">Path: {current_path}</p>
 <p class="info">UUID: {current_uid[:16]}...</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
@@ -181,15 +187,22 @@ async function gen(){{let r=await fetch('/new');let d=await r.json();document.ge
             self.wfile.write(html.encode())
             
         elif self.path == '/new':
-            new_uid = str(uuid.uuid4())
-            with open('xray.json', 'w') as f: json.dump(build_config(new_uid), f)
-            new_url = make_url(new_uid)
+            new_uid = str(uuid_lib.uuid4())
+            new_path = f"/ws/{new_uid}"
+            users[new_uid] = new_path
+            with open('xray.json', 'w') as f: json.dump(build_config(), f)
+            # Restart Xray
+            try:
+                subprocess.run(['pkill', 'xray'], capture_output=True)
+                time.sleep(1)
+                subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except: pass
+            new_url = make_url(new_uid, new_path)
             self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
             self.wfile.write(json.dumps({'url':new_url}).encode())
             
         elif self.path == '/health':
             self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
-            
         else:
             self.send_response(404); self.end_headers()
     
