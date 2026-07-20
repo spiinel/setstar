@@ -1,4 +1,4 @@
-import os, sys, json, base64, subprocess, time, uuid, secrets, zipfile, socket, threading, select, struct, hashlib
+import os, sys, json, base64, subprocess, time, uuid, secrets, zipfile, socket, threading, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
@@ -14,6 +14,9 @@ XRAY_PORT = 10086
 WS_PATH = f"/ws/{uuid.uuid4().hex[:8]}"
 
 print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT} | Path: {WS_PATH}")
+
+current_uid = str(uuid.uuid4())
+current_url = ""
 
 def download_xray():
     if os.path.exists('./xray'): return True
@@ -57,13 +60,11 @@ def start_xray():
         return False
 
 download_xray()
-uid = str(uuid.uuid4())
-with open('xray.json', 'w') as f: json.dump(build_config(uid), f)
+with open('xray.json', 'w') as f: json.dump(build_config(current_uid), f)
 start_xray()
-url = make_url(uid)
+current_url = make_url(current_uid)
 
 def relay(src, dst):
-    """انتقال داده بین دو سوکت"""
     try:
         while True:
             data = src.recv(4096)
@@ -77,8 +78,7 @@ def relay(src, dst):
         try: dst.close()
         except: pass
 
-def handle_ws(client_sock, client_addr):
-    """هندل WebSocket در thread جدا"""
+def handle_ws(client_sock):
     backend = None
     try:
         backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -101,7 +101,6 @@ def handle_ws(client_sock, client_addr):
             except: pass
             return
         
-        # حالا relay دوطرفه
         t1 = threading.Thread(target=relay, args=(client_sock, backend), daemon=True)
         t2 = threading.Thread(target=relay, args=(backend, client_sock), daemon=True)
         t1.start()
@@ -122,7 +121,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/ws/'):
             try:
-                # Get WebSocket key from client
                 key = self.headers.get('Sec-WebSocket-Key', '')
                 accept = base64.b64encode(
                     hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()
@@ -137,8 +135,7 @@ class Handler(BaseHTTPRequestHandler):
                 client = self.request
                 self.request = None
                 
-                # Handle in new thread
-                threading.Thread(target=handle_ws, args=(client, client.getpeername()), daemon=True).start()
+                threading.Thread(target=handle_ws, args=(client,), daemon=True).start()
                 
             except Exception as e:
                 print(f"Upgrade error: {e}")
@@ -160,26 +157,25 @@ class Handler(BaseHTTPRequestHandler):
 <div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
 <div class="container">
 <div class="card"><h2>📡 VLESS Config</h2>
-<div class="config-box" id="config">{url}</div>
+<div class="config-box" id="config">{current_url}</div>
 <p class="info">Address: {DOMAIN} | Port: {PANEL_PORT}</p>
-<p class="info">Path: {WS_PATH} | UUID: {uid[:16]}...</p>
+<p class="info">Path: {WS_PATH}</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
 </div></div>
 <script>
-function copy(){{navigator.clipboard.writeText(document.getElementById('config').textContent);alert('✅ Copied!')}}
-async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('config').textContent=d.url;alert('✅ New config!')}}
+function copy(){{navigator.clipboard.writeText(document.getElementById('config').textContent);alert('Copied!')}}
+async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('config').textContent=d.url}}
 </script></body></html>'''
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(html.encode())
             
         elif self.path == '/new':
-            global uid, url
-            uid = str(uuid.uuid4())
-            with open('xray.json', 'w') as f: json.dump(build_config(uid), f)
-            url = make_url(uid)
+            new_uid = str(uuid.uuid4())
+            with open('xray.json', 'w') as f: json.dump(build_config(new_uid), f)
+            new_url = make_url(new_uid)
             self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({'url':url}).encode())
+            self.wfile.write(json.dumps({'url':new_url}).encode())
             
         elif self.path == '/health':
             self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
@@ -190,16 +186,13 @@ async function gen(){{let r=await fetch('/new');let d=await r.json();document.ge
     def log_message(self, f, *a): pass
 
 class ThreadedHTTPServer(HTTPServer):
-    """هر درخواست توی thread جدا"""
     def process_request(self, request, client_address):
         t = threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True)
         t.start()
-    
     def process_request_thread(self, request, client_address):
         try: self.finish_request(request, client_address)
         except: self.handle_error(request, client_address)
         finally: self.shutdown_request(request)
 
-print(f"✅ Panel: http://{DOMAIN}:{PANEL_PORT}")
-print(f"✅ VLESS: {url}")
+print(f"✅ Ready: {current_url}")
 ThreadedHTTPServer(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
