@@ -1,5 +1,8 @@
+[phases.setup]
+nixPkgs = ["python3", "python3Packages.pip"]
+
 [phases.install]
-cmds = ["pip install requests"]
+cmds = ["python3 -m pip install requests"]
 
 [start]
-cmd = "python install.py"
+cmd = "python3 install.py"
