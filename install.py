@@ -1,4 +1,3 @@
-
 import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket, threading, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
@@ -13,29 +12,44 @@ uid = str(uuid_lib.uuid4())
 path = f"/ws/{uid}"
 
 def download_xray():
-    if os.path.exists('./xray'): return True
+    if os.path.exists('./xray'):
+        return True
     try:
         url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         r = req.get(url, timeout=120)
-        with open('xray.zip', 'wb') as f: f.write(r.content)
-        with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
+        with open('xray.zip', 'wb') as f:
+            f.write(r.content)
+        with zipfile.ZipFile('xray.zip', 'r') as z:
+            z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
         return True
-    except: return False
+    except:
+        return False
 
 def build_xray_config():
     return {
         "log": {"loglevel": "warning"},
         "dns": {"servers": ["8.8.8.8", "1.1.1.1"]},
         "inbounds": [{
-            "listen": "127.0.0.1", "port": XRAY_PORT, "protocol": "vless",
-            "settings": {"clients": [{"id": uid, "encryption": "none"}], "decryption": "none"},
-            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
+            "listen": "127.0.0.1",
+            "port": XRAY_PORT,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": uid, "encryption": "none"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {"path": path}
+            }
         }],
-        "outbounds": [
-            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIP"}}
-        ]
+        "outbounds": [{
+            "protocol": "freedom",
+            "tag": "direct",
+            "settings": {"domainStrategy": "UseIP"}
+        }]
     }
 
 def make_url():
@@ -43,43 +57,66 @@ def make_url():
     return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel"
 
 download_xray()
-with open('xray.json', 'w') as f: json.dump(build_xray_config(), f)
-subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+with open('xray.json', 'w') as f:
+    json.dump(build_xray_config(), f)
+
+subprocess.Popen(
+    ['./xray', 'run', '-config', 'xray.json'],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL
+)
 time.sleep(2)
 
 def relay(a, b):
     try:
         while True:
             d = a.recv(4096)
-            if not d: break
+            if not d:
+                break
             b.send(d)
-    except: pass
+    except:
+        pass
     finally:
-        try: a.close()
-        except: pass
-        try: b.close()
-        except: pass
+        try:
+            a.close()
+        except:
+            pass
+        try:
+            b.close()
+        except:
+            pass
 
 def handle_ws(client):
     backend = None
     try:
         backend = socket.socket()
         backend.connect(('127.0.0.1', XRAY_PORT))
-        backend.send(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+        req_str = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        backend.send(req_str.encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
             resp += backend.recv(4096)
-        if b"101" not in resp: return
+        if b"101" not in resp:
+            return
         t1 = threading.Thread(target=relay, args=(client, backend), daemon=True)
         t2 = threading.Thread(target=relay, args=(backend, client), daemon=True)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
-    except: pass
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except:
+        pass
     finally:
-        try: client.close()
-        except: pass
-        if backend: try: backend.close()
-        except: pass
+        try:
+            client.close()
+        except:
+            pass
+        if backend is not None:
+            try:
+                backend.close()
+            except:
+                pass
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -105,20 +142,32 @@ code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:8px;wor
 <div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
 <p>Port: 443 | WebSocket | VLESS</p>
 <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div></body></html>'''
-            self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
             self.wfile.write(h.encode())
         elif self.path == '/health':
-            self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
-        else: self.send_response(404); self.end_headers()
-    def log_message(self,f,*a): pass
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, f, *a):
+        pass
 
 class T(HTTPServer):
     def process_request(self, r, a):
-        threading.Thread(target=self.process_request_thread, args=(r,a), daemon=True).start()
+        threading.Thread(target=self.process_request_thread, args=(r, a), daemon=True).start()
+
     def process_request_thread(self, r, a):
-        try: self.finish_request(r, a)
-        except: self.handle_error(r, a)
-        finally: self.shutdown_request(r)
+        try:
+            self.finish_request(r, a)
+        except:
+            self.handle_error(r, a)
+        finally:
+            self.shutdown_request(r)
 
 url = make_url()
 print(f"\nPanel: http://{DOMAIN}:{PANEL_PORT}")
