@@ -1,4 +1,4 @@
-import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket, threading, hashlib, struct
+import os, sys, json, base64, subprocess, time, uuid as uuid_lib, zipfile, socket, threading, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
@@ -37,7 +37,7 @@ def build_xray_config():
     }
 
 def make_url():
-    params = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome&allowInsecure=1"
+    params = f"security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome"
     return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel"
 
 download_xray()
@@ -120,6 +120,6 @@ class T(HTTPServer):
         finally: self.shutdown_request(r)
 
 url = make_url()
-print(f"\n✅ Panel: http://{DOMAIN}:{PANEL_PORT}")
-print(f"✅ VLESS: {url}\n")
+print(f"\nPanel: http://{DOMAIN}:{PANEL_PORT}")
+print(f"VLESS: {url}\n")
 T(('0.0.0.0', PANEL_PORT), H).serve_forever()
