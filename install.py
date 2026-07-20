@@ -47,21 +47,30 @@ def build_config(uid):
     }
 
 def make_url(uid):
-    params = f"security=none&encryption=none&type=ws&path={WS_PATH}&host={DOMAIN}"
-    return f"vless://{uid}@{DOMAIN}:{PANEL_PORT}?{params}#Spinel"
-
-def start_xray():
-    try:
-        subprocess.Popen(['./xray', 'run', '-config', 'xray.json'],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
-        return True
-    except:
-        return False
+    params = [
+        "security=tls",
+        "encryption=none",
+        "type=ws",
+        f"path={WS_PATH}",
+        f"host={DOMAIN}",
+        f"sni={DOMAIN}",
+        "alpn=http/1.1",
+        "fp=chrome",
+        "allowInsecure=1"
+    ]
+    return f"vless://{uid}@{DOMAIN}:443?{'&'.join(params)}#Spinel"
 
 download_xray()
 with open('xray.json', 'w') as f: json.dump(build_config(current_uid), f)
-start_xray()
+
+try:
+    subprocess.Popen(['./xray', 'run', '-config', 'xray.json'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    print("[+] Xray started")
+except Exception as e:
+    print(f"[-] Xray error: {e}")
+
 current_url = make_url(current_uid)
 
 def relay(src, dst):
@@ -156,9 +165,10 @@ class Handler(BaseHTTPRequestHandler):
 </style></head><body>
 <div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
 <div class="container">
-<div class="card"><h2>📡 VLESS Config</h2>
+<div class="card"><h2>📡 VLESS Config (TLS)</h2>
 <div class="config-box" id="config">{current_url}</div>
-<p class="info">Address: {DOMAIN} | Port: {PANEL_PORT}</p>
+<p class="info">Address: {DOMAIN} | Port: 443</p>
+<p class="info">Security: TLS | allowInsecure: true</p>
 <p class="info">Path: {WS_PATH}</p>
 <button class="btn btn-g" onclick="copy()">📋 Copy</button>
 <button class="btn btn-b" onclick="gen()">🔄 New</button>
