@@ -1,10 +1,6 @@
-{
-  "build": {
-    "builder": "NIXPACKS"
-  },
-  "deploy": {
-    "startCommand": "python install.py",
-    "healthcheckPath": "/health",
-    "restartPolicyType": "ON_FAILURE"
-  }
-}
+[build]
+builder = "nixpacks"
+buildCommand = "pip install requests"
+
+[deploy]
+startCommand = "python install.py"
