@@ -1,8 +1,10 @@
-import os, sys, json, base64, subprocess, time, uuid, secrets, zipfile, socket, threading, select, struct, random, hashlib
+import os, sys, json, base64, subprocess, time, uuid, secrets, zipfile, socket, threading, select, struct, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+if not DOMAIN:
+    DOMAIN = os.environ.get('RAILWAY_STATIC_URL', '')
 if not DOMAIN:
     try: DOMAIN = socket.gethostname()
     except: DOMAIN = 'localhost'
@@ -22,10 +24,10 @@ def download_xray():
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
-        print("[+] Xray ready")
+        print("[+] Xray downloaded")
         return True
-    except:
-        print("[-] Xray download failed")
+    except Exception as e:
+        print(f"[-] Xray error: {e}")
         return False
 
 def build_config(uid):
@@ -45,72 +47,128 @@ def make_url(uid):
     params = f"security=none&encryption=none&type=ws&path={WS_PATH}&host={DOMAIN}"
     return f"vless://{uid}@{DOMAIN}:{PANEL_PORT}?{params}#Spinel"
 
+def start_xray():
+    try:
+        subprocess.Popen(['./xray', 'run', '-config', 'xray.json'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        return True
+    except:
+        return False
+
 download_xray()
 uid = str(uuid.uuid4())
 with open('xray.json', 'w') as f: json.dump(build_config(uid), f)
-
-try:
-    subprocess.Popen(['./xray', 'run', '-config', 'xray.json'], 
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2)
-    print("[+] Xray started")
-except Exception as e:
-    print(f"[-] Xray error: {e}")
-
+start_xray()
 url = make_url(uid)
+
+def relay(src, dst):
+    """انتقال داده بین دو سوکت"""
+    try:
+        while True:
+            data = src.recv(4096)
+            if not data: break
+            dst.send(data)
+    except:
+        pass
+    finally:
+        try: src.close()
+        except: pass
+        try: dst.close()
+        except: pass
+
+def handle_ws(client_sock, client_addr):
+    """هندل WebSocket در thread جدا"""
+    backend = None
+    try:
+        backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        backend.settimeout(5)
+        backend.connect(('127.0.0.1', XRAY_PORT))
+        
+        req = f"GET {WS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        backend.send(req.encode())
+        
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = backend.recv(4096)
+            if not chunk: break
+            resp += chunk
+        
+        if b"101" not in resp:
+            try: client_sock.close()
+            except: pass
+            try: backend.close()
+            except: pass
+            return
+        
+        # حالا relay دوطرفه
+        t1 = threading.Thread(target=relay, args=(client_sock, backend), daemon=True)
+        t2 = threading.Thread(target=relay, args=(backend, client_sock), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        
+    except Exception as e:
+        print(f"WS error: {e}")
+    finally:
+        try: client_sock.close()
+        except: pass
+        if backend:
+            try: backend.close()
+            except: pass
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/ws/'):
-            self.send_response(101)
-            self.send_header('Upgrade', 'websocket')
-            self.send_header('Connection', 'Upgrade')
-            key = self.headers.get('Sec-WebSocket-Key', '')
-            if key:
-                accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-                self.send_header('Sec-WebSocket-Accept', accept)
-            self.end_headers()
-            
-            client = self.request
-            self.request = None
-            
             try:
-                backend = socket.socket()
-                backend.connect(('127.0.0.1', XRAY_PORT))
-                backend.send(f"GET {WS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
-                backend.recv(4096)
+                # Get WebSocket key from client
+                key = self.headers.get('Sec-WebSocket-Key', '')
+                accept = base64.b64encode(
+                    hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()
+                ).decode()
                 
-                def relay(a, b):
-                    try:
-                        while True:
-                            data = a.recv(4096)
-                            if not data: break
-                            b.send(data)
-                    except: pass
-                    finally:
-                        try: a.close()
-                        except: pass
-                        try: b.close()
-                        except: pass
+                self.send_response(101)
+                self.send_header('Upgrade', 'websocket')
+                self.send_header('Connection', 'Upgrade')
+                self.send_header('Sec-WebSocket-Accept', accept)
+                self.end_headers()
                 
-                threading.Thread(target=relay, args=(client, backend), daemon=True).start()
-                threading.Thread(target=relay, args=(backend, client), daemon=True).start()
-            except: pass
-            
+                client = self.request
+                self.request = None
+                
+                # Handle in new thread
+                threading.Thread(target=handle_ws, args=(client, client.getpeername()), daemon=True).start()
+                
+            except Exception as e:
+                print(f"Upgrade error: {e}")
+                
         elif self.path == '/':
-            html = f'''<html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
-<style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:20px;text-align:center}}
-.box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;max-width:600px;margin:20px auto}}
-code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:8px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
-.btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em;margin:5px}}</style></head><body>
-<h1>🌀 Spinel</h1><p>{DOMAIN}</p>
-<div class="box"><h3>Config</h3><code id="c">{url}</code>
-<p>Port: {PANEL_PORT} | Path: {WS_PATH}</p>
-<button class="btn" onclick="copy()">Copy</button>
-<button class="btn" onclick="gen()">New</button></div>
+            html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Spinel VLESS</title>
+<style>:root{{--bg:#0d1117;--card:#161b22;--border:#30363d;--blue:#58a6ff;--green:#3fb950;--text:#c9d1d9;--dim:#8b949e}}
+*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}}
+.nav{{background:var(--card);border-bottom:1px solid var(--border);padding:15px;text-align:center}}
+.nav h1{{background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+.container{{max-width:650px;margin:0 auto;padding:12px}}
+.card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin:12px 0}}
+.card h2{{color:var(--blue);font-size:.95em;margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:8px}}
+.config-box{{background:rgba(0,0,0,.4);padding:10px;border-radius:8px;word-break:break-all;font-family:monospace;font-size:.7em;color:var(--green);margin:8px 0;line-height:1.6;max-height:150px;overflow-y:auto}}
+.info{{color:var(--dim);font-size:.7em;margin:3px 0}}
+.btn{{padding:10px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:.8em;margin:4px 0;width:100%}}
+.btn-g{{background:#238636;color:#fff}}.btn-b{{background:#1f6feb;color:#fff}}
+</style></head><body>
+<div class="nav"><h1>🌀 Spinel VLESS</h1><p style="color:var(--dim);font-size:.75em">{DOMAIN}</p></div>
+<div class="container">
+<div class="card"><h2>📡 VLESS Config</h2>
+<div class="config-box" id="config">{url}</div>
+<p class="info">Address: {DOMAIN} | Port: {PANEL_PORT}</p>
+<p class="info">Path: {WS_PATH} | UUID: {uid[:16]}...</p>
+<button class="btn btn-g" onclick="copy()">📋 Copy</button>
+<button class="btn btn-b" onclick="gen()">🔄 New</button>
+</div></div>
 <script>
-function copy(){{navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')}}
-async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('c').textContent=d.url}}
+function copy(){{navigator.clipboard.writeText(document.getElementById('config').textContent);alert('✅ Copied!')}}
+async function gen(){{let r=await fetch('/new');let d=await r.json();document.getElementById('config').textContent=d.url;alert('✅ New config!')}}
 </script></body></html>'''
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(html.encode())
@@ -125,10 +183,23 @@ async function gen(){{let r=await fetch('/new');let d=await r.json();document.ge
             
         elif self.path == '/health':
             self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
+            
         else:
             self.send_response(404); self.end_headers()
     
     def log_message(self, f, *a): pass
 
-print(f"✅ Ready: {url}")
-HTTPServer(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
+class ThreadedHTTPServer(HTTPServer):
+    """هر درخواست توی thread جدا"""
+    def process_request(self, request, client_address):
+        t = threading.Thread(target=self.process_request_thread, args=(request, client_address), daemon=True)
+        t.start()
+    
+    def process_request_thread(self, request, client_address):
+        try: self.finish_request(request, client_address)
+        except: self.handle_error(request, client_address)
+        finally: self.shutdown_request(request)
+
+print(f"✅ Panel: http://{DOMAIN}:{PANEL_PORT}")
+print(f"✅ VLESS: {url}")
+ThreadedHTTPServer(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
