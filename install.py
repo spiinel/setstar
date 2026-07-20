@@ -26,23 +26,22 @@ def download_xray():
 def build_xray_config():
     return {
         "log": {"loglevel": "warning"},
-        "dns": {
-            "servers": ["8.8.8.8", "1.1.1.1", "localhost"]
-        },
+        "dns": {"servers": ["8.8.8.8", "1.1.1.1"]},
         "inbounds": [{
-            "listen": "127.0.0.1",
-            "port": XRAY_PORT,
-            "protocol": "vless",
+            "listen": "127.0.0.1", "port": XRAY_PORT, "protocol": "vless",
             "settings": {"clients": [{"id": uid, "encryption": "none"}], "decryption": "none"},
             "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIP"}},
+            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIPv4"}},
+            {"protocol": "freedom", "tag": "direct-ip", "settings": {"domainStrategy": "UseIP"}},
             {"protocol": "blackhole", "tag": "blocked"}
         ],
         "routing": {
-            "domainStrategy": "AsIs",
-            "rules": [{"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}]
+            "domainStrategy": "IPOnDemand",
+            "rules": [
+                {"type": "field", "outboundTag": "direct", "network": "tcp,udp"}
+            ]
         }
     }
 
@@ -72,17 +71,27 @@ def handle_ws(client):
     backend = None
     try:
         backend = socket.socket()
+        backend.settimeout(10)
         backend.connect(('127.0.0.1', XRAY_PORT))
-        backend.send(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+        req_str = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        backend.send(req_str.encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
-            resp += backend.recv(4096)
-        if b"101" not in resp: return
+            chunk = backend.recv(4096)
+            if not chunk: break
+            resp += chunk
+        if b"101" not in resp:
+            try: client.close()
+            except: pass
+            try: backend.close()
+            except: pass
+            return
         t1 = threading.Thread(target=relay, args=(client, backend), daemon=True)
         t2 = threading.Thread(target=relay, args=(backend, client), daemon=True)
         t1.start(); t2.start()
         t1.join(); t2.join()
-    except: pass
+    except Exception as e:
+        print(f"WS error: {e}")
     finally:
         try: client.close()
         except: pass
