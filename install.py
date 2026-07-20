@@ -17,38 +17,30 @@ current_path = f"/ws/{current_uid}"
 xray_process = None
 process_lock = threading.Lock()
 
-log.info(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT} | Version: {XRAY_VERSION}")
+log.info(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT}")
 
 def download_xray():
     if os.path.exists('./xray') and os.path.getsize('./xray') > 10000000:
-        log.info("Xray already downloaded")
         return True
-    
     log.info(f"Downloading Xray {XRAY_VERSION}...")
     try:
         r = req.get(XRAY_URL, timeout=120, headers={'User-Agent': 'Mozilla/5.0'})
         if r.status_code != 200:
             log.error(f"HTTP {r.status_code}")
             return False
-        
-        with open('xray.zip', 'wb') as f:
-            f.write(r.content)
-        
+        with open('xray.zip', 'wb') as f: f.write(r.content)
         import zipfile
         if not zipfile.is_zipfile('xray.zip'):
-            log.error("Not a valid ZIP file")
+            log.error("Not a valid ZIP")
             os.remove('xray.zip')
             return False
-        
-        with zipfile.ZipFile('xray.zip', 'r') as z:
-            z.extractall('.')
+        with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
-        
-        log.info(f"Xray downloaded: {os.path.getsize('./xray')} bytes")
+        log.info("Downloaded")
         return True
     except Exception as e:
-        log.error(f"Download failed: {e}")
+        log.error(f"Download: {e}")
         return False
 
 def build_config():
@@ -84,15 +76,12 @@ def start_xray():
         with open('xray_config.json', 'w') as f:
             json.dump(config, f, indent=2)
         
-        log.info("Starting Xray...")
-        
-        # SEND XRAY OUTPUT DIRECTLY TO RAILWAY LOGS
+        log.info("Starting Xray (output to Railway logs)...")
         xray_process = subprocess.Popen(
             ['./xray', 'run', '-config', 'xray_config.json'],
             stdout=sys.stdout,
             stderr=sys.stderr
         )
-        
         time.sleep(3)
         
         if xray_process.poll() is not None:
@@ -104,15 +93,12 @@ def start_xray():
 
 def health_check():
     try:
-        s = socket.socket()
-        s.settimeout(5)
+        s = socket.socket(); s.settimeout(5)
         s.connect(('127.0.0.1', XRAY_PORT))
         s.send(f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
-        resp = s.recv(1024)
-        s.close()
+        resp = s.recv(1024); s.close()
         return b"101" in resp
-    except Exception as e:
-        log.warning(f"Health check: {e}")
+    except:
         return False
 
 def watchdog():
@@ -127,11 +113,9 @@ def pipe_data(src, dst, name):
     try:
         while True:
             data = src.recv(32768)
-            if not data:
-                break
+            if not data: break
             dst.sendall(data)
-    except:
-        pass
+    except: pass
     finally:
         try: src.close()
         except: pass
@@ -141,21 +125,15 @@ def pipe_data(src, dst, name):
 def handle_ws_client(client_sock, client_addr):
     backend = None
     try:
-        backend = socket.socket()
-        backend.settimeout(10)
+        backend = socket.socket(); backend.settimeout(10)
         backend.connect(('127.0.0.1', XRAY_PORT))
-        
         backend.sendall(f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
             c = backend.recv(4096)
             if not c: break
             resp += c
-        
-        if b"101" not in resp:
-            log.warning(f"No 101 from Xray")
-            return
-        
+        if b"101" not in resp: return
         t1 = threading.Thread(target=pipe_data, args=(client_sock, backend, "C2X"), daemon=True)
         t2 = threading.Thread(target=pipe_data, args=(backend, client_sock, "X2C"), daemon=True)
         t1.start(); t2.start()
@@ -178,7 +156,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(101); self.send_header('Upgrade','websocket'); self.send_header('Connection','Upgrade'); self.send_header('Sec-WebSocket-Accept',accept); self.end_headers()
             c = self.request; self.request = None
             threading.Thread(target=handle_ws_client, args=(c, self.client_address), daemon=True).start()
-        
         elif self.path == '/':
             url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
             sub = base64.b64encode((url+"\n").encode()).decode()
@@ -196,14 +173,11 @@ code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;wor
 </body></html>'''
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(h.encode())
-        
         elif self.path == '/health':
             ok = health_check(); self.send_response(200 if ok else 503); self.end_headers()
             self.wfile.write(b'OK' if ok else b'FAIL')
-        
         else: self.send_response(404); self.end_headers()
-    
-    def log_message(self, f, *a): pass
+    def log_message(self,f,*a): pass
 
 class T(HTTPServer):
     def process_request(self, r, a):
