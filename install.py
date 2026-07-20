@@ -52,9 +52,59 @@ def build_xray_config():
         }]
     }
 
-def make_url():
-    params = f"security=none&encryption=none&type=ws&path={path}&host={DOMAIN}"
-    return f"vless://{uid}@{DOMAIN}:443?{params}#Spinel"
+def generate_all_configs():
+    """تولید تمام کانفیگ‌های ممکن"""
+    configs = []
+    
+    # 1. WebSocket + security=none (روش اصلی Railway)
+    configs.append({
+        "name": "WS-None",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={path}&host={DOMAIN}#Spinel-WS-None"
+    })
+    
+    # 2. WebSocket + security=tls + allowInsecure
+    configs.append({
+        "name": "WS-TLS-Insecure",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome&allowInsecure=1#Spinel-WS-TLS"
+    })
+    
+    # 3. WebSocket + security=tls (بدون allowInsecure)
+    configs.append({
+        "name": "WS-TLS",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=tls&encryption=none&type=ws&path={path}&host={DOMAIN}&sni={DOMAIN}&alpn=http/1.1&fp=chrome#Spinel-WS-TLS"
+    })
+    
+    # 4. WebSocket + port 8080 + security=none
+    configs.append({
+        "name": "WS-8080-None",
+        "url": f"vless://{uid}@{DOMAIN}:8080?security=none&encryption=none&type=ws&path={path}&host={DOMAIN}#Spinel-WS-8080"
+    })
+    
+    # 5. TCP + security=none
+    configs.append({
+        "name": "TCP-None",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=none&encryption=none&type=tcp#Spinel-TCP-None"
+    })
+    
+    # 6. TCP + security=tls
+    configs.append({
+        "name": "TCP-TLS",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=tls&encryption=none&type=tcp&sni={DOMAIN}&fp=chrome&alpn=h2,http/1.1#Spinel-TCP-TLS"
+    })
+    
+    # 7. gRPC + security=tls
+    configs.append({
+        "name": "gRPC-TLS",
+        "url": f"vless://{uid}@{DOMAIN}:443?security=tls&encryption=none&type=grpc&serviceName={path}&sni={DOMAIN}&fp=chrome&alpn=h2#Spinel-gRPC-TLS"
+    })
+    
+    return configs
+
+def make_subscription(configs):
+    """ساخت لینک سابسکریپشن"""
+    urls = [c["url"] for c in configs]
+    content = "\n".join(urls)
+    return base64.b64encode(content.encode()).decode()
 
 download_xray()
 
@@ -67,6 +117,9 @@ subprocess.Popen(
     stderr=subprocess.DEVNULL
 )
 time.sleep(2)
+
+all_configs = generate_all_configs()
+sub_b64 = make_subscription(all_configs)
 
 def relay(a, b):
     try:
@@ -131,25 +184,68 @@ class H(BaseHTTPRequestHandler):
             c = self.request
             self.request = None
             threading.Thread(target=handle_ws, args=(c,), daemon=True).start()
-        elif self.path == '/':
-            url = make_url()
-            h = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
-<style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:20px;text-align:center}}
-.box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;max-width:600px;margin:20px auto}}
-code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:8px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
-.btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em}}</style></head><body>
-<h1>🌀 Spinel VLESS</h1><p>{DOMAIN}</p>
-<div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
-<p>Port: 443 | WebSocket | VLESS</p>
-<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div></body></html>'''
+        
+        elif self.path == '/' or self.path == '':
+            # نمایش همه کانفیگ‌ها
+            configs_html = ""
+            for i, c in enumerate(all_configs, 1):
+                configs_html += f"""
+                <div class="config-item">
+                    <strong>#{i} - {c['name']}</strong>
+                    <code>{c['url'][:80]}...</code>
+                    <button class="btn" onclick="copy('{c['url'].replace(chr(39), chr(92)+chr(39))}')">📋 Copy</button>
+                </div>"""
+            
+            h = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel VLESS</title>
+<style>
+body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:15px;text-align:center}}
+h1{{background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+.box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:15px;max-width:700px;margin:15px auto;text-align:right}}
+code{{background:rgba(0,0,0,.4);padding:8px;display:block;border-radius:6px;word-break:break-all;color:#3fb950;font-size:.75em;margin:8px 0}}
+.btn{{background:#238636;color:white;border:none;padding:8px 15px;border-radius:6px;cursor:pointer;font-size:.8em;margin:3px}}
+.btn-b{{background:#1f6feb}}.btn-r{{background:#da3633}}
+.config-item{{background:rgba(0,0,0,.2);padding:10px;margin:8px 0;border-radius:8px;border:1px solid #30363d}}
+.info{{color:#8b949e;font-size:.75em}}
+</style></head><body>
+<h1>🌀 Spinel VLESS</h1>
+<p class="info">{DOMAIN} | UUID: {uid[:16]}...</p>
+
+<div class="box">
+<h3 style="color:#58a6ff">🔗 Subscription Link (All Configs)</h3>
+<code>{sub_b64}</code>
+<p class="info">Use this in v2rayNG: + → Import from Subscription</p>
+<button class="btn btn-b" onclick="copy('{sub_b64}')">📋 Copy Subscription</button>
+</div>
+
+<div class="box">
+<h3 style="color:#58a6ff">📡 All Configs ({len(all_configs)} methods)</h3>
+{configs_html}
+</div>
+
+<div class="box">
+<h3 style="color:#58a6ff">📱 How to Use</h3>
+<p class="info" style="line-height:2">
+1. Copy <strong>Subscription Link</strong> above<br>
+2. Open v2rayNG → + → <strong>Import from Subscription</strong><br>
+3. Paste the subscription code<br>
+4. All configs will be imported<br>
+5. Try each one to find working method ✅
+</p>
+</div>
+
+<script>
+function copy(t){{navigator.clipboard.writeText(t);alert('✅ Copied!')}}
+</script></body></html>'''
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(h.encode())
+        
         elif self.path == '/health':
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'OK')
+        
         else:
             self.send_response(404)
             self.end_headers()
@@ -169,7 +265,6 @@ class T(HTTPServer):
         finally:
             self.shutdown_request(r)
 
-url = make_url()
 print(f"\nPanel: http://{DOMAIN}:{PANEL_PORT}")
-print(f"VLESS: {url}\n")
+print(f"Subscription: {sub_b64[:50]}...\n")
 T(('0.0.0.0', PANEL_PORT), H).serve_forever()
