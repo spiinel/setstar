@@ -1,6 +1,3 @@
-[providers]
-type = "python"
-
 [phases.install]
 cmds = ["pip install requests"]
 
