@@ -2,7 +2,7 @@
 nixPkgs = ["python311"]
 
 [phases.install]
-cmds = ["pip3 install requests"]
+cmds = ["python3 -m pip install requests"]
 
 [start]
 cmd = "python3 install.py"
