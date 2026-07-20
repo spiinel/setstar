@@ -25,7 +25,10 @@ def download_xray():
 
 def build_xray_config():
     return {
-        "log": {"loglevel": "error"},
+        "log": {"loglevel": "warning"},
+        "dns": {
+            "servers": ["8.8.8.8", "1.1.1.1", "localhost"]
+        },
         "inbounds": [{
             "listen": "127.0.0.1",
             "port": XRAY_PORT,
@@ -33,7 +36,14 @@ def build_xray_config():
             "settings": {"clients": [{"id": uid, "encryption": "none"}], "decryption": "none"},
             "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}}
         }],
-        "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIP"}},
+            {"protocol": "blackhole", "tag": "blocked"}
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [{"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}]
+        }
     }
 
 def make_url():
