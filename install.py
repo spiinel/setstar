@@ -79,21 +79,24 @@ if __name__ == '__main__':
     if not start_xray():
         sys.exit(1)
     
-    url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
+    url = f"vless://{current_uid}@{DOMAIN}:443?security=tls&encryption=none&type=ws&path={current_path}&host={DOMAIN}&sni={DOMAIN}&fp=chrome#Spinel"
     
     print(f"""
-╔══════════════════════════════════════╗
-║   🌀 Spinel VLESS Ready             ║
-╠══════════════════════════════════════╣
+╔══════════════════════════════════════════╗
+║   🌀 Spinel VLESS Ready                 ║
+╠══════════════════════════════════════════╣
 ║ {url}║
-╚══════════════════════════════════════╝
+╚══════════════════════════════════════════╝
 
 Domain: {DOMAIN}
 Port: 443
+Security: TLS
 UUID: {current_uid}
 Path: {current_path}
+SNI: {DOMAIN}
+Fingerprint: chrome
 
-Copy link → v2rayNG → Import from Clipboard
+Copy → v2rayNG → Import from Clipboard
 """)
     
     try:
