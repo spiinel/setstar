@@ -3,8 +3,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests as req
 
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '') or socket.gethostname()
-PANEL_PORT = int(os.environ.get('PORT', 8080))
-XRAY_PORT = 10086
+PANEL_PORT = 10000
+XRAY_PORT = int(os.environ.get('PORT', 8080))
 
 current_uid = str(uuid.uuid4())
 current_path = f"/ws/{current_uid}"
@@ -12,7 +12,11 @@ current_path = f"/ws/{current_uid}"
 xray_process = None
 process_lock = threading.Lock()
 
-print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT}")
+print(f"Domain: {DOMAIN}")
+print(f"Xray on PORT: {XRAY_PORT}")
+print(f"Panel on: {PANEL_PORT}")
+print(f"UUID: {current_uid}")
+print(f"Path: {current_path}")
 
 def download_xray():
     if os.path.exists('./xray') and os.path.getsize('./xray') > 10000000:
@@ -33,26 +37,40 @@ def download_xray():
 def build_xray_config():
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [{
-            "listen": "127.0.0.1",
-            "port": XRAY_PORT,
-            "protocol": "vless",
-            "settings": {
-                "clients": [{"id": current_uid}],
-                "decryption": "none"
+        "inbounds": [
+            {
+                "listen": "0.0.0.0",
+                "port": XRAY_PORT,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": current_uid}],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "none",
+                    "wsSettings": {"path": current_path}
+                },
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
             },
-            "streamSettings": {
-                "network": "ws",
-                "security": "none",
-                "wsSettings": {"path": current_path}
-            },
-            "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
-        }],
-        "outbounds": [{
-            "protocol": "freedom",
-            "tag": "direct",
-            "settings": {"domainStrategy": "UseIP"}
-        }]
+            {
+                "listen": "127.0.0.1",
+                "port": PANEL_PORT,
+                "protocol": "dokodemo-door",
+                "settings": {
+                    "address": "127.0.0.1",
+                    "port": PANEL_PORT,
+                    "network": "tcp"
+                }
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag": "direct",
+                "settings": {"domainStrategy": "UseIP"}
+            }
+        ]
     }
 
 def start_xray():
@@ -68,80 +86,14 @@ def start_xray():
             stderr=sys.stderr
         )
         time.sleep(3)
-        return xray_process.poll() is None
-
-def pipe(src, dst):
-    try:
-        while True:
-            d = src.recv(32768)
-            if not d:
-                break
-            dst.sendall(d)
-    except:
-        pass
-    finally:
-        try:
-            src.close()
-        except:
-            pass
-        try:
-            dst.close()
-        except:
-            pass
-
-def handle_ws(client):
-    backend = None
-    try:
-        backend = socket.socket()
-        backend.settimeout(10)
-        backend.connect(('127.0.0.1', XRAY_PORT))
-        req_str = f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        backend.sendall(req_str.encode())
-        resp = b""
-        while b"\r\n\r\n" not in resp:
-            c = backend.recv(4096)
-            if not c:
-                break
-            resp += c
-        if b"101" not in resp:
-            return
-        t1 = threading.Thread(target=pipe, args=(client, backend), daemon=True)
-        t2 = threading.Thread(target=pipe, args=(backend, client), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join(timeout=300)
-        t2.join(timeout=300)
-    except:
-        pass
-    finally:
-        try:
-            client.close()
-        except:
-            pass
-        if backend is not None:
-            try:
-                backend.close()
-            except:
-                pass
+        ok = xray_process.poll() is None
+        if ok:
+            print(f"[+] Xray running on 0.0.0.0:{XRAY_PORT}")
+        return ok
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith('/ws/'):
-            key = self.headers.get('Sec-WebSocket-Key', '')
-            if not key:
-                self.send_response(400)
-                self.end_headers()
-                return
-            acc = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-            self.send_response(101)
-            self.send_header('Upgrade', 'websocket')
-            self.send_header('Connection', 'Upgrade')
-            self.send_header('Sec-WebSocket-Accept', acc)
-            self.end_headers()
-            c = self.request
-            self.request = None
-            threading.Thread(target=handle_ws, args=(c,), daemon=True).start()
-        elif self.path == '/':
+        if self.path == '/' or self.path == '':
             url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
             sub = base64.b64encode((url + "\n").encode()).decode()
             html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
@@ -149,11 +101,11 @@ class H(BaseHTTPRequestHandler):
 .box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:15px;max-width:600px;margin:15px auto;text-align:right}}
 code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
 .btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:.9em;margin:4px}}</style></head><body>
-<h1 style="background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">🌀 Spinel</h1>
+<h1 style="background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">🌀 Spinel VLESS</h1>
 <p style="color:#8b949e">{DOMAIN}</p>
-<div class="box"><h3 style="color:#58a6ff">📡 Config</h3><code id="c">{url}</code>
+<div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
 <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div>
-<div class="box"><h3 style="color:#58a6ff">🔗 Sub</h3><code id="s">{sub}</code>
+<div class="box"><h3>🔗 Subscription</h3><code id="s">{sub}</code>
 <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('s').textContent);alert('Copied!')">📋 Copy Sub</button></div>
 </body></html>'''
             self.send_response(200)
@@ -171,21 +123,20 @@ code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;wor
     def log_message(self, f, *a):
         pass
 
-class T(HTTPServer):
-    def process_request(self, r, a):
-        threading.Thread(target=self._p, args=(r, a), daemon=True).start()
-
-    def _p(self, r, a):
-        try:
-            self.finish_request(r, a)
-        except:
-            pass
-        finally:
-            self.shutdown_request(r)
-
 if __name__ == '__main__':
     download_xray()
     if start_xray():
         url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
         print(f"\nReady!\n{url}\n")
-        T(('0.0.0.0', PANEL_PORT), H).serve_forever()
+        
+        # Panel on internal port
+        panel = HTTPServer(('127.0.0.1', PANEL_PORT), H)
+        threading.Thread(target=panel.serve_forever, daemon=True).start()
+        print(f"[+] Panel on 127.0.0.1:{PANEL_PORT}")
+        
+        # Keep alive
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
