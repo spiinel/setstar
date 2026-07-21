@@ -5,8 +5,6 @@ import requests as req
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '') or socket.gethostname()
 PANEL_PORT = int(os.environ.get('PORT', 8080))
 XRAY_PORT = 10086
-XRAY_VERSION = "v1.8.21"
-XRAY_URL = f"https://github.com/XTLS/Xray-core/releases/download/{XRAY_VERSION}/Xray-linux-64.zip"
 
 current_uid = str(uuid.uuid4())
 current_path = f"/ws/{current_uid}"
@@ -14,26 +12,30 @@ current_path = f"/ws/{current_uid}"
 xray_process = None
 process_lock = threading.Lock()
 
-print(f"Domain: {DOMAIN} | Panel: {PANEL_PORT} | Xray: {XRAY_PORT}")
+print(f"[*] Domain : {DOMAIN}")
+print(f"[*] Panel  : {PANEL_PORT}")
+print(f"[*] Xray   : {XRAY_PORT}")
+print(f"[*] UUID   : {current_uid}")
+print(f"[*] Path   : {current_path}")
 
 def download_xray():
     if os.path.exists('./xray') and os.path.getsize('./xray') > 10000000:
         return True
-    print(f"Downloading Xray {XRAY_VERSION}...")
+    print("[*] Downloading Xray...")
     try:
-        r = req.get(XRAY_URL, timeout=120)
+        r = req.get("https://github.com/XTLS/Xray-core/releases/download/v1.8.21/Xray-linux-64.zip", timeout=120)
         with open('xray.zip', 'wb') as f: f.write(r.content)
         import zipfile
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
-        print("Downloaded")
+        print("[+] Downloaded")
         return True
     except Exception as e:
-        print(f"Download error: {e}")
+        print(f"[-] {e}")
         return False
 
-def build_config():
+def build_xray_config():
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
@@ -59,9 +61,11 @@ def start_xray():
         if xray_process and xray_process.poll() is None:
             return True
         
+        config = build_xray_config()
         with open('xray_config.json', 'w') as f:
-            json.dump(build_config(), f, indent=2)
+            json.dump(config, f, indent=2)
         
+        print("[*] Starting Xray...")
         xray_process = subprocess.Popen(
             ['./xray', 'run', '-config', 'xray_config.json'],
             stdout=sys.stdout, stderr=sys.stderr
@@ -69,11 +73,14 @@ def start_xray():
         time.sleep(3)
         
         if xray_process.poll() is not None:
-            print(f"Xray exited with code {xray_process.returncode}")
+            print(f"[-] Xray exited: {xray_process.returncode}")
             return False
         
-        print(f"Xray running (PID: {xray_process.pid})")
+        print(f"[+] Xray PID: {xray_process.pid}")
         return True
+
+def make_vless_url():
+    return f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
 
 def pipe_data(src, dst):
     try:
@@ -122,20 +129,28 @@ class Handler(BaseHTTPRequestHandler):
             c = self.request; self.request = None
             threading.Thread(target=handle_ws, args=(c,), daemon=True).start()
         elif self.path == '/':
-            url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
+            url = make_vless_url()
             sub = base64.b64encode((url+"\n").encode()).decode()
-            html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
+            html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel VLESS</title>
 <style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:15px;text-align:center}}
 .box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:15px;max-width:600px;margin:15px auto;text-align:right}}
 code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
 .btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:.9em;margin:4px}}</style></head><body>
 <h1 style="background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">🌀 Spinel VLESS</h1>
 <p style="color:#8b949e">{DOMAIN}</p>
-<div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
-<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div>
+<div class="box"><h3>📡 VLESS Config</h3><code id="c">{url}</code>
+<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('✅ Copied!')">📋 Copy Config</button></div>
 <div class="box"><h3>🔗 Subscription</h3><code id="s">{sub}</code>
-<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('s').textContent);alert('Copied!')">📋 Copy Sub</button></div>
-</body></html>'''
+<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('s').textContent);alert('✅ Copied!')">📋 Copy Sub</button></div>
+<div class="box"><h3>📋 Details</h3>
+<p style="color:#8b949e;font-size:.8em;line-height:2">
+Domain: {DOMAIN}<br>
+Port: 443<br>
+UUID: {current_uid}<br>
+Path: {current_path}<br>
+Type: VLESS + WebSocket<br>
+Security: None (TLS by Railway)
+</p></div></body></html>'''
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(html.encode())
         elif self.path == '/health':
@@ -152,8 +167,15 @@ class T(HTTPServer):
         finally: self.shutdown_request(r)
 
 if __name__ == '__main__':
-    download_xray()
-    if start_xray():
-        url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
-        print(f"\nReady!\n{url}\n")
-        T(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
+    if not download_xray(): sys.exit(1)
+    if not start_xray(): sys.exit(1)
+    
+    url = make_vless_url()
+    print(f"""
+╔══════════════════════════════════════╗
+║   🌀 Spinel VLESS Ready             ║
+╠══════════════════════════════════════╣
+║ {url[:50]}...║
+╚══════════════════════════════════════╝
+""")
+    T(('0.0.0.0', PANEL_PORT), Handler).serve_forever()
