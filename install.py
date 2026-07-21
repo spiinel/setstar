@@ -1,22 +1,21 @@
-import os, sys, json, base64, subprocess, time, uuid, hashlib, threading, socket
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os, sys, json, subprocess, time, uuid, socket
 import requests as req
 
 DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '') or socket.gethostname()
 PORT = int(os.environ.get('PORT', 8080))
-XRAY_PORT = 10086
 
 current_uid = str(uuid.uuid4())
 current_path = f"/ws/{current_uid}"
 
-xray_process = None
-process_lock = threading.Lock()
-
-print(f"Domain: {DOMAIN} | Port: {PORT} | Xray: {XRAY_PORT}")
+print(f"Domain: {DOMAIN}")
+print(f"Port: {PORT}")
+print(f"UUID: {current_uid}")
+print(f"Path: {current_path}")
 
 def download_xray():
     if os.path.exists('./xray') and os.path.getsize('./xray') > 10000000:
         return True
+    print("Downloading Xray...")
     try:
         r = req.get("https://github.com/XTLS/Xray-core/releases/download/v1.8.21/Xray-linux-64.zip", timeout=120)
         with open('xray.zip', 'wb') as f: f.write(r.content)
@@ -24,15 +23,18 @@ def download_xray():
         with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
+        print("Downloaded")
         return True
-    except: return False
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
 
-def build_xray_config():
+def build_config():
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
-            "listen": "127.0.0.1",
-            "port": XRAY_PORT,
+            "listen": "0.0.0.0",
+            "port": PORT,
             "protocol": "vless",
             "settings": {
                 "clients": [{"id": current_uid}],
@@ -42,121 +44,60 @@ def build_xray_config():
                 "network": "ws",
                 "security": "none",
                 "wsSettings": {"path": current_path}
-            },
-            "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
+            }
         }],
         "outbounds": [{
             "protocol": "freedom",
-            "tag": "direct",
-            "settings": {"domainStrategy": "UseIP"}
+            "tag": "direct"
         }]
     }
 
 def start_xray():
-    global xray_process
-    with process_lock:
-        if xray_process is not None and xray_process.poll() is None:
-            return True
-        with open('xray_config.json', 'w') as f:
-            json.dump(build_xray_config(), f, indent=2)
-        xray_process = subprocess.Popen(
-            ['./xray', 'run', '-config', 'xray_config.json'],
-            stdout=sys.stdout, stderr=sys.stderr
-        )
-        time.sleep(3)
-        return xray_process.poll() is None
-
-def pipe(src, dst):
-    try:
-        while True:
-            d = src.recv(32768)
-            if not d: break
-            dst.sendall(d)
-    except: pass
-    finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
-
-def handle_ws(client):
-    backend = None
-    try:
-        backend = socket.socket()
-        backend.settimeout(10)
-        backend.connect(('127.0.0.1', XRAY_PORT))
-        backend.sendall(f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
-        resp = b""
-        while b"\r\n\r\n" not in resp:
-            c = backend.recv(4096)
-            if not c: break
-            resp += c
-        if b"101" not in resp: return
-        t1 = threading.Thread(target=pipe, args=(client, backend), daemon=True)
-        t2 = threading.Thread(target=pipe, args=(backend, client), daemon=True)
-        t1.start(); t2.start()
-        t1.join(timeout=300); t2.join(timeout=300)
-    except: pass
-    finally:
-        try: client.close()
-        except: pass
-        if backend is not None:
-            try: backend.close()
-            except: pass
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith('/ws/'):
-            key = self.headers.get('Sec-WebSocket-Key', '')
-            if not key: self.send_response(400); self.end_headers(); return
-            acc = base64.b64encode(hashlib.sha1((key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-            self.send_response(101)
-            self.send_header('Upgrade','websocket')
-            self.send_header('Connection','Upgrade')
-            self.send_header('Sec-WebSocket-Accept',acc)
-            self.end_headers()
-            c = self.request
-            self.request = None
-            threading.Thread(target=handle_ws, args=(c,), daemon=True).start()
-        elif self.path == '/':
-            url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
-            sub = base64.b64encode((url+"\n").encode()).decode()
-            html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
-<style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:15px;text-align:center}}
-.box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:15px;max-width:600px;margin:15px auto;text-align:right}}
-code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;word-break:break-all;color:#3fb950;font-size:.8em;margin:10px 0}}
-.btn{{background:#238636;color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:.9em;margin:4px}}</style></head><body>
-<h1 style="background:linear-gradient(45deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">🌀 Spinel VLESS</h1>
-<p style="color:#8b949e">{DOMAIN}</p>
-<div class="box"><h3>📡 Config</h3><code id="c">{url}</code>
-<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('c').textContent);alert('Copied!')">📋 Copy</button></div>
-<div class="box"><h3>🔗 Sub</h3><code id="s">{sub}</code>
-<button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('s').textContent);alert('Copied!')">📋 Copy Sub</button></div>
-</body></html>'''
-            self.send_response(200)
-            self.send_header('Content-Type','text/html; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(html.encode())
-        elif self.path == '/health':
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def log_message(self,f,*a): pass
-
-class T(HTTPServer):
-    def process_request(self, r, a):
-        threading.Thread(target=self._p, args=(r,a), daemon=True).start()
-    def _p(self, r, a):
-        try: self.finish_request(r, a)
-        except: pass
-        finally: self.shutdown_request(r)
+    config = build_config()
+    with open('xray_config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print("Starting Xray...")
+    proc = subprocess.Popen(
+        ['./xray', 'run', '-config', 'xray_config.json'],
+        stdout=sys.stdout,
+        stderr=sys.stderr
+    )
+    time.sleep(3)
+    
+    if proc.poll() is not None:
+        print(f"Xray exited: {proc.returncode}")
+        return False
+    
+    print(f"Xray running on 0.0.0.0:{PORT}")
+    return True
 
 if __name__ == '__main__':
-    download_xray()
-    if start_xray():
-        url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
-        print(f"\nReady!\n{url}\n")
-        T(('0.0.0.0', PORT), H).serve_forever()
+    if not download_xray():
+        sys.exit(1)
+    
+    if not start_xray():
+        sys.exit(1)
+    
+    url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
+    
+    print(f"""
+╔══════════════════════════════════════╗
+║   🌀 Spinel VLESS Ready             ║
+╠══════════════════════════════════════╣
+║ {url}║
+╚══════════════════════════════════════╝
+
+Domain: {DOMAIN}
+Port: 443
+UUID: {current_uid}
+Path: {current_path}
+
+Copy link → v2rayNG → Import from Clipboard
+""")
+    
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nDone")
