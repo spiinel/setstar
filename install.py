@@ -19,13 +19,16 @@ def download_xray():
         return True
     try:
         r = req.get("https://github.com/XTLS/Xray-core/releases/download/v1.8.21/Xray-linux-64.zip", timeout=120)
-        with open('xray.zip', 'wb') as f: f.write(r.content)
+        with open('xray.zip', 'wb') as f:
+            f.write(r.content)
         import zipfile
-        with zipfile.ZipFile('xray.zip', 'r') as z: z.extractall('.')
+        with zipfile.ZipFile('xray.zip', 'r') as z:
+            z.extractall('.')
         os.chmod('./xray', 0o755)
         os.remove('xray.zip')
         return True
-    except: return False
+    except:
+        return False
 
 def build_xray_config():
     return {
@@ -55,13 +58,14 @@ def build_xray_config():
 def start_xray():
     global xray_process
     with process_lock:
-        if xray_process and xray_process.poll() is None:
+        if xray_process is not None and xray_process.poll() is None:
             return True
         with open('xray_config.json', 'w') as f:
             json.dump(build_xray_config(), f, indent=2)
         xray_process = subprocess.Popen(
             ['./xray', 'run', '-config', 'xray_config.json'],
-            stdout=sys.stdout, stderr=sys.stderr
+            stdout=sys.stdout,
+            stderr=sys.stderr
         )
         time.sleep(3)
         return xray_process.poll() is None
@@ -70,50 +74,76 @@ def pipe(src, dst):
     try:
         while True:
             d = src.recv(32768)
-            if not d: break
+            if not d:
+                break
             dst.sendall(d)
-    except: pass
+    except:
+        pass
     finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
+        try:
+            src.close()
+        except:
+            pass
+        try:
+            dst.close()
+        except:
+            pass
 
 def handle_ws(client):
     backend = None
     try:
-        backend = socket.socket(); backend.settimeout(10)
+        backend = socket.socket()
+        backend.settimeout(10)
         backend.connect(('127.0.0.1', XRAY_PORT))
-        backend.sendall(f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+        req_str = f"GET {current_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        backend.sendall(req_str.encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
             c = backend.recv(4096)
-            if not c: break
+            if not c:
+                break
             resp += c
-        if b"101" not in resp: return
+        if b"101" not in resp:
+            return
         t1 = threading.Thread(target=pipe, args=(client, backend), daemon=True)
         t2 = threading.Thread(target=pipe, args=(backend, client), daemon=True)
-        t1.start(); t2.start()
-        t1.join(timeout=300); t2.join(timeout=300)
-    except: pass
+        t1.start()
+        t2.start()
+        t1.join(timeout=300)
+        t2.join(timeout=300)
+    except:
+        pass
     finally:
-        try: client.close()
-        except: pass
-        if backend: try: backend.close()
-        except: pass
+        try:
+            client.close()
+        except:
+            pass
+        if backend is not None:
+            try:
+                backend.close()
+            except:
+                pass
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/ws/'):
             key = self.headers.get('Sec-WebSocket-Key', '')
-            if not key: self.send_response(400); self.end_headers(); return
-            acc = base64.b64encode(hashlib.sha1((key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-            self.send_response(101); self.send_header('Upgrade','websocket'); self.send_header('Connection','Upgrade'); self.send_header('Sec-WebSocket-Accept',acc); self.end_headers()
-            c = self.request; self.request = None
+            if not key:
+                self.send_response(400)
+                self.end_headers()
+                return
+            acc = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+            self.send_response(101)
+            self.send_header('Upgrade', 'websocket')
+            self.send_header('Connection', 'Upgrade')
+            self.send_header('Sec-WebSocket-Accept', acc)
+            self.end_headers()
+            c = self.request
+            self.request = None
             threading.Thread(target=handle_ws, args=(c,), daemon=True).start()
         elif self.path == '/':
             url = f"vless://{current_uid}@{DOMAIN}:443?security=none&encryption=none&type=ws&path={current_path}&host={DOMAIN}#Spinel"
-            sub = base64.b64encode((url+"\n").encode()).decode()
+            sub = base64.b64encode((url + "\n").encode()).decode()
             html = f'''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Spinel</title>
 <style>body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;padding:15px;text-align:center}}
 .box{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:15px;max-width:600px;margin:15px auto;text-align:right}}
@@ -126,20 +156,32 @@ code{{background:rgba(0,0,0,.4);padding:10px;display:block;border-radius:6px;wor
 <div class="box"><h3 style="color:#58a6ff">🔗 Sub</h3><code id="s">{sub}</code>
 <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('s').textContent);alert('Copied!')">📋 Copy Sub</button></div>
 </body></html>'''
-            self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
             self.wfile.write(html.encode())
         elif self.path == '/health':
-            self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
-        else: self.send_response(404); self.end_headers()
-    def log_message(self,f,*a): pass
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, f, *a):
+        pass
 
 class T(HTTPServer):
     def process_request(self, r, a):
-        threading.Thread(target=self._p, args=(r,a), daemon=True).start()
+        threading.Thread(target=self._p, args=(r, a), daemon=True).start()
+
     def _p(self, r, a):
-        try: self.finish_request(r, a)
-        except: pass
-        finally: self.shutdown_request(r)
+        try:
+            self.finish_request(r, a)
+        except:
+            pass
+        finally:
+            self.shutdown_request(r)
 
 if __name__ == '__main__':
     download_xray()
